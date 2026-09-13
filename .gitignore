@@ -1,0 +1,52 @@
+# ───────────────────────────────────────────────────────────────
+# AirBridge — Swift / Xcode / macOS
+# ───────────────────────────────────────────────────────────────
+
+# ── macOS Finder ──
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Xcode ──
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.xcscheme
+
+# Backups Xcode
+*.bak
+*.backup-*
+*.orig
+*.swp
+*.swo
+
+# ── Swift Package Manager ──
+.build/
+Packages/
+Package.resolved
+.swiftpm/
+
+# ── CocoaPods (non utilisé mais harmless) ──
+Pods/
+
+# ── Carthage (non utilisé mais harmless) ──
+Carthage/Build/
+
+# ── Logs de build (artefacts) ──
+build.log
+build_log.txt
+*.log
+
+# ── Fichiers npm (artefacts accidentels, projet n'utilise pas npm) ──
+package-lock.json
+node_modules/
+
+# ── Fichiers temporaires ──
+*.tmp
+*.dump
+*~
+*.swp

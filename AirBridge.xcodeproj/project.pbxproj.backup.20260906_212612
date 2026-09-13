@@ -1,0 +1,678 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		FC1366FA3037727C00636CBD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FC629FEF3008FAC600087936 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FC629FF63008FAC600087936;
+			remoteInfo = AirBridge;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		FC629FF73008FAC600087936 /* AirBridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AirBridge.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FC7000013000000000000001 /* AirBridgeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AirBridgeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		FC1FE15E30140B70004B02A8 /* Exceptions for "Transfer" folder in "AirBridge" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				FileHasher.swift,
+				IncomingFileWriter.swift,
+				IncomingTransferManager.swift,
+				OutgoingFileSource.swift,
+				OutgoingTransferManager.swift,
+				PendingApprovalCoordinator.swift,
+				PendingTransferRequest.swift,
+				Transfer.swift,
+				TransferCancelledPayload.swift,
+				TransferFailedPayload.swift,
+				TransferManager.swift,
+				TransferStore.swift,
+				TransferSucceededPayload.swift,
+				TransfertStorage.swift,
+				TransfertTimeoutManager.swift,
+			);
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+		};
+		FC3B83CE3010102E0056B428 /* Exceptions for "Network" folder in "AirBridge" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ConnectionManager.swift,
+			);
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+		};
+		FC4FBD95300F8DE400A00B24 /* Exceptions for "Discovery" folder in "AirBridge" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				BonjourService.swift,
+				Device.swift,
+				DiscoveredDevice.swift,
+				DiscoveryManager.swift,
+				LocalDeviceFactory.swift,
+			);
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+		};
+		FC4FBD9A300F8E0F00A00B24 /* Exceptions for "UI" folder in "AirBridge" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Components/FloatingActionBar.swift,
+				Discovery/AirBridgeFolderPicker.swift,
+				Discovery/ConnectionStatusView.swift,
+				Discovery/DeviceListView.swift,
+				Discovery/DeviceRow.swift,
+				MainView.swift,
+				Settings/SettingsView.swift,
+				Transfers/TransferDetailView.swift,
+				Transfers/TransferFileKind.swift,
+				Transfers/TransferListView.swift,
+				Transfers/TransferOriginBadge.swift,
+				Transfers/TransferOverviewRow.swift,
+				Transfers/TransferRequestSheet.swift,
+				Transfers/TransferRow.swift,
+			);
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+		};
+		FC62A0093008FBE900087936 /* Exceptions for "Core" folder in "AirBridge" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AirBridgeCore.swift,
+			);
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+		};
+		FC8A6DCB30168BB000522D90 /* Exceptions for "Session" folder in "AirBridge" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AirBridgeSession.swift,
+			);
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+		};
+		FC8A6DCF3016B01D00522D90 /* Exceptions for "Settings" folder in "AirBridge" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ReceivedFolderStore.swift,
+			);
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+		};
+		FC983714301214B60091B36E /* Exceptions for "Protocol" folder in "AirBridge" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AirBridgeMessage.swift,
+				AirBridgeMessageType.swift,
+				FrameCodec.swift,
+				MessageCodec.swift,
+				MessageRouter.swift,
+				Payloads/FileChunkPayload.swift,
+				Payloads/TransferAcceptedPayload.swift,
+				Payloads/TransferCompletedPayload.swift,
+				Payloads/TransferRejectedPayload.swift,
+				Payloads/TransferRequestPayload.swift,
+			);
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+		};
+		FCF4F332300A0FD100941C7B /* Exceptions for "AirBridge" folder in "AirBridge" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		FC4FBD8C300F8D7300A00B24 /* Discovery */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FC4FBD95300F8DE400A00B24 /* Exceptions for "Discovery" folder in "AirBridge" target */,
+			);
+			path = Discovery;
+			sourceTree = "<group>";
+		};
+		FC4FBD8D300F8D7300A00B24 /* Network */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FC3B83CE3010102E0056B428 /* Exceptions for "Network" folder in "AirBridge" target */,
+			);
+			path = Network;
+			sourceTree = "<group>";
+		};
+		FC4FBD8E300F8D7300A00B24 /* Security */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Security;
+			sourceTree = "<group>";
+		};
+		FC4FBD8F300F8D7300A00B24 /* Transfer */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FC1FE15E30140B70004B02A8 /* Exceptions for "Transfer" folder in "AirBridge" target */,
+			);
+			path = Transfer;
+			sourceTree = "<group>";
+		};
+		FC4FBD96300F8DEC00A00B24 /* UI */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FC4FBD9A300F8E0F00A00B24 /* Exceptions for "UI" folder in "AirBridge" target */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		FC629FF93008FAC600087936 /* AirBridge */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FCF4F332300A0FD100941C7B /* Exceptions for "AirBridge" folder in "AirBridge" target */,
+			);
+			path = AirBridge;
+			sourceTree = "<group>";
+		};
+		FC62A0063008FB3200087936 /* Core */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FC62A0093008FBE900087936 /* Exceptions for "Core" folder in "AirBridge" target */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		FC70000D300000000000000D /* Tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		FC8A6DC830168B3B00522D90 /* Session */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FC8A6DCB30168BB000522D90 /* Exceptions for "Session" folder in "AirBridge" target */,
+			);
+			path = Session;
+			sourceTree = "<group>";
+		};
+		FC8A6DCC3016AFFE00522D90 /* Settings */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FC8A6DCF3016B01D00522D90 /* Exceptions for "Settings" folder in "AirBridge" target */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		FC983711301213330091B36E /* Protocol */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				FC983714301214B60091B36E /* Exceptions for "Protocol" folder in "AirBridge" target */,
+			);
+			path = Protocol;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FC629FF43008FAC600087936 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC7000033000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		FC629FEE3008FAC600087936 = {
+			isa = PBXGroup;
+			children = (
+				FC8A6DCC3016AFFE00522D90 /* Settings */,
+				FC8A6DC830168B3B00522D90 /* Session */,
+				FC629FF93008FAC600087936 /* AirBridge */,
+				FC4FBD96300F8DEC00A00B24 /* UI */,
+				FC62A0063008FB3200087936 /* Core */,
+				FC629FF83008FAC600087936 /* Products */,
+				FC4FBD8C300F8D7300A00B24 /* Discovery */,
+				FC4FBD8D300F8D7300A00B24 /* Network */,
+				FC983711301213330091B36E /* Protocol */,
+				FC4FBD8E300F8D7300A00B24 /* Security */,
+				FC4FBD8F300F8D7300A00B24 /* Transfer */,
+				FC70000D300000000000000D /* Tests */,
+			);
+			sourceTree = "<group>";
+		};
+		FC629FF83008FAC600087936 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				FC629FF73008FAC600087936 /* AirBridge.app */,
+				FC7000013000000000000001 /* AirBridgeTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		FC629FF63008FAC600087936 /* AirBridge */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FC62A0023008FAC800087936 /* Build configuration list for PBXNativeTarget "AirBridge" */;
+			buildPhases = (
+				FC629FF33008FAC600087936 /* Sources */,
+				FC629FF43008FAC600087936 /* Frameworks */,
+				FC629FF53008FAC600087936 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				FC629FF93008FAC600087936 /* AirBridge */,
+			);
+			name = AirBridge;
+			packageProductDependencies = (
+			);
+			productName = AirBridge;
+			productReference = FC629FF73008FAC600087936 /* AirBridge.app */;
+			productType = "com.apple.product-type.application";
+		};
+		FC7000063000000000000006 /* AirBridgeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FC70000A300000000000000A /* Build configuration list for PBXNativeTarget "AirBridgeTests" */;
+			buildPhases = (
+				FC7000053000000000000005 /* Sources */,
+				FC7000033000000000000003 /* Frameworks */,
+				FC7000043000000000000004 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FC7000073000000000000007 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				FC70000D300000000000000D /* Tests */,
+			);
+			name = AirBridgeTests;
+			productName = AirBridgeTests;
+			productReference = FC7000013000000000000001 /* AirBridgeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		FC629FEF3008FAC600087936 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2650;
+				LastUpgradeCheck = 2650;
+				TargetAttributes = {
+					FC629FF63008FAC600087936 = {
+						CreatedOnToolsVersion = 26.5;
+					};
+				};
+			};
+			buildConfigurationList = FC629FF23008FAC600087936 /* Build configuration list for PBXProject "AirBridge" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = FC629FEE3008FAC600087936;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = FC629FF83008FAC600087936 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				FC629FF63008FAC600087936 /* AirBridge */,
+				FC7000063000000000000006 /* AirBridgeTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		FC629FF53008FAC600087936 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC7000043000000000000004 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		FC629FF33008FAC600087936 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FC7000053000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		FC7000073000000000000007 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = AirBridge;
+			target = FC629FF63008FAC600087936 /* AirBridge */;
+			targetProxy = FC1366FA3037727C00636CBD /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		FC62A0003008FAC800087936 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		FC62A0013008FAC800087936 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		FC62A0033008FAC800087936 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6YB7XZ3S2Q;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER = readwrite;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AirBridge/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "";
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "AirBridge utilise le réseau local pour détecter les appareils et transférer des fichiers.";
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Massinissa.AirBridge;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				XROS_DEPLOYMENT_TARGET = 26.5;
+			};
+			name = Debug;
+		};
+		FC62A0043008FAC800087936 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6YB7XZ3S2Q;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER = readwrite;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = NO;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AirBridge/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "";
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "AirBridge utilise le réseau local pour détecter les appareils et transférer des fichiers.";
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphoneos*]" = YES;
+				"INFOPLIST_KEY_UILaunchScreen_Generation[sdk=iphonesimulator*]" = YES;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphoneos*]" = UIStatusBarStyleDefault;
+				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Massinissa.AirBridge;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				SDKROOT = auto;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				XROS_DEPLOYMENT_TARGET = 26.5;
+			};
+			name = Release;
+		};
+		FC7000083000000000000008 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = Massinissa.AirBridgeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AirBridge.app/Contents/MacOS/AirBridge";
+			};
+			name = Debug;
+		};
+		FC7000093000000000000009 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = Massinissa.AirBridgeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,7";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AirBridge.app/Contents/MacOS/AirBridge";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		FC629FF23008FAC600087936 /* Build configuration list for PBXProject "AirBridge" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FC62A0003008FAC800087936 /* Debug */,
+				FC62A0013008FAC800087936 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FC62A0023008FAC800087936 /* Build configuration list for PBXNativeTarget "AirBridge" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FC62A0033008FAC800087936 /* Debug */,
+				FC62A0043008FAC800087936 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FC70000A300000000000000A /* Build configuration list for PBXNativeTarget "AirBridgeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FC7000083000000000000008 /* Debug */,
+				FC7000093000000000000009 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = FC629FEF3008FAC600087936 /* Project object */;
+}

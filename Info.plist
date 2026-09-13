@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.airbridge</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>airbridge</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_airbridge._tcp</string>
+	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<!--
+		iOS uniquement (ignoré sur macOS/xros). Sans cette clé, iOS lance
+		l'app en mode compatibilité : rendu centré ~60 % dans une zone à
+		ratio fixe avec bandes noires, au lieu du plein écran safe-area.
+		Les clés INFOPLIST_KEY_UILaunchScreen_Generation du pbxproj sont
+		inefficaces ici car GENERATE_INFOPLIST_FILE = NO : la clé doit être
+		déclarée directement dans ce plist.
+	-->
+	<key>UILaunchScreen</key>
+	<dict/>
+</dict>
+</plist>
