@@ -244,20 +244,41 @@ final class MacOSShareViewController: NSViewController {
                 }
                 // [DIAG-TEMP FinderService] résultat de l'extraction.
                 Self.diag.info(
-                    "[DIAG-TEMP] extraction → \(sourceURL?.path ?? "nil", privacy: .public)"
+                    "[DIAG-TEMP] extraction public.file-url → \(sourceURL?.path ?? "nil", privacy: .public)"
                 )
-                guard let sourceURL else { continue }
 
+                if let sourceURL {
+                    do {
+                        let destURL = try await copyToBatchDirectory(
+                            sourceURL,
+                            in: batchDirectory
+                        )
+                        copiedURLs.append(destURL)
+                        print("✅ Copié : \(destURL.lastPathComponent)")
+                    } catch {
+                        cleanupIncompleteBatch()
+                        showErrorState("Échec de la copie de \(sourceURL.lastPathComponent).")
+                        return
+                    }
+                    continue
+                }
+
+                // Repli : le Finder peut n'enregistrer que l'UTI du CONTENU
+                // (public.jpeg, com.adobe.pdf…) sans public.file-url. On
+                // demande alors une représentation FICHIER du type
+                // réellement enregistré ; la copie a lieu dans le handler
+                // (le temporaire remis n'est valide que pendant celui-ci).
                 do {
-                    let destURL = try await copyToBatchDirectory(
-                        sourceURL,
-                        in: batchDirectory
-                    )
-                    copiedURLs.append(destURL)
-                    print("✅ Copié : \(destURL.lastPathComponent)")
+                    if let destURL = try await copyFileRepresentation(
+                        from: provider,
+                        into: batchDirectory
+                    ) {
+                        copiedURLs.append(destURL)
+                        print("✅ Copié (repli représentation) : \(destURL.lastPathComponent)")
+                    }
                 } catch {
                     cleanupIncompleteBatch()
-                    showErrorState("Échec de la copie de \(sourceURL.lastPathComponent).")
+                    showErrorState("Impossible de lire le fichier sélectionné.")
                     return
                 }
             }
@@ -459,6 +480,55 @@ final class MacOSShareViewController: NSViewController {
         return nil
     }
 
+    /// Repli d'extraction quand le provider n'expose pas `public.file-url` :
+    /// demande une représentation FICHIER du premier type enregistré qui en
+    /// fournit une (`loadFileRepresentation`). L'URL remise au handler est
+    /// temporaire et détruite à son retour : la copie vers le lot est donc
+    /// faite DANS le handler, pas après.
+    /// - Returns: URL de la copie dans le lot, ou nil si aucun type ne
+    ///   fournit de fichier.
+    private func copyFileRepresentation(
+        from provider: NSItemProvider,
+        into directory: URL
+    ) async throws -> URL? {
+        for typeIdentifier in provider.registeredTypeIdentifiers {
+            // [DIAG-TEMP FinderService] tentative de repli par type.
+            Self.diag.info(
+                "[DIAG-TEMP] repli loadFileRepresentation(\(typeIdentifier, privacy: .public))"
+            )
+
+            let result: URL? = try await withCheckedThrowingContinuation { continuation in
+                provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { url, error in
+                    if let url, url.isFileURL {
+                        do {
+                            let destURL = Self.uniqueDestinationURL(
+                                in: directory,
+                                named: url.lastPathComponent
+                            )
+                            try FileManager.default.copyItem(at: url, to: destURL)
+                            continuation.resume(returning: destURL)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                        return
+                    }
+                    // Pas de représentation fichier pour CE type : on
+                    // essaiera le suivant (nil sans erreur bloquante).
+                    continuation.resume(returning: nil)
+                }
+            }
+
+            if let result {
+                // [DIAG-TEMP FinderService] repli réussi.
+                Self.diag.info(
+                    "[DIAG-TEMP] repli réussi → \(result.lastPathComponent, privacy: .public)"
+                )
+                return result
+            }
+        }
+        return nil
+    }
+
     /// Copie la ressource security-scoped vers le répertoire du lot, avec
     /// un nom unique en cas de collision.
     private func copyToBatchDirectory(_ source: URL, in directory: URL) async throws -> URL {
@@ -510,6 +580,16 @@ final class MacOSShareViewController: NSViewController {
     /// Génère une destination unique : si le nom existe déjà, on préfixe
     /// avec un compteur ("1_toto.txt", "2_toto.txt", …).
     private func uniqueDestination(in directory: URL, named name: String) -> URL {
+        Self.uniqueDestinationURL(in: directory, named: name)
+    }
+
+    /// Variante `nonisolated` de `uniqueDestination` — appelable depuis les
+    /// handlers de `NSItemProvider` (thread arbitraire) ; fonction pure
+    /// hormis les lectures FileManager.
+    private nonisolated static func uniqueDestinationURL(
+        in directory: URL,
+        named name: String
+    ) -> URL {
         let fileManager = FileManager.default
         let base = name.isEmpty ? "fichier" : name
         var candidate = directory.appendingPathComponent(base)
