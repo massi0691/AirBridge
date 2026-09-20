@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Entitlements macOS de l'application principale.
+		Fichier dédié macOS : les clés com.apple.security.* du sandbox
+		macOS ne doivent pas fuir vers iOS/visionOS (échec de signature).
+		Sélectionné via CODE_SIGN_ENTITLEMENTS[sdk=macosx*].
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Bonjour + connexions sortantes vers les pairs (_airbridge._tcp). -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- Écoute entrante : réception des transferts des autres appareils. -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<!-- Fichiers choisis par l'utilisateur (envoi) : lecture/écriture. -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<!-- Dossier Téléchargements : destination par défaut des réceptions. -->
+	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
+	<!-- Lot partagé avec FinderService (PendingShares). -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.airbridge.shared</string>
+	</array>
+</dict>
+</plist>
