@@ -234,6 +234,14 @@ final class PendingShareController {
                 includingPropertiesForKeys: nil
             )
         } catch {
+            // Le répertoire est créé à la demande par les extensions. Son
+            // absence signifie simplement qu'il n'y a encore aucun lot à
+            // purger, pas un échec de nettoyage.
+            if Self.isNoSuchFileError(error) {
+                logger.debug("Aucun répertoire PendingShares à purger")
+                return result
+            }
+
             logger.error("Purge impossible : \(error.localizedDescription, privacy: .public)")
             result.errors.append(
                 PendingSharePruneError(url: Self.pendingSharesRoot(in: container), reason: error.localizedDescription)
@@ -313,6 +321,15 @@ final class PendingShareController {
         }
 
         return result
+    }
+
+    /// `PendingShares/` peut ne pas encore exister lors d'un premier
+    /// balayage. Cocoa le signale comme une lecture d'un fichier absent,
+    /// ce qui est un état normal pour une boîte de réception vide.
+    private static func isNoSuchFileError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSCocoaErrorDomain
+            && nsError.code == NSFileReadNoSuchFileError
     }
 
     /// Supprime un fichier de lot. `nil` en cas de succès.
