@@ -48,28 +48,31 @@ final class TransferStorage {
 
         #elseif os(macOS)
 
-        guard let selectedDirectory =
-            receivedFolderStore.selectedDirectory else {
-            throw TransferManagerError
-                .receivedDirectoryNotSelected
+        if let selectedDirectory = receivedFolderStore.selectedDirectory {
+            // Le dossier choisi reste prioritaire et conserve son accès
+            // security-scoped pendant toute l'opération.
+            let hasAccess =
+                selectedDirectory
+                    .startAccessingSecurityScopedResource()
+
+            guard hasAccess else {
+                throw TransferManagerError
+                    .receivedDirectoryAccessDenied
+            }
+
+            defer {
+                selectedDirectory
+                    .stopAccessingSecurityScopedResource()
+            }
+
+            destinationDirectory = selectedDirectory
+        } else {
+            // Sans préférence enregistrée, la réception reste utilisable
+            // en repliant vers le dossier Downloads de l'utilisateur.
+            destinationDirectory = FileManager.default
+                .homeDirectoryForCurrentUser
+                .appendingPathComponent("Downloads", isDirectory: true)
         }
-
-        let hasAccess =
-            selectedDirectory
-                .startAccessingSecurityScopedResource()
-
-        guard hasAccess else {
-            throw TransferManagerError
-                .receivedDirectoryAccessDenied
-        }
-
-        defer {
-            selectedDirectory
-                .stopAccessingSecurityScopedResource()
-        }
-
-        destinationDirectory =
-            selectedDirectory
 
         #else
 

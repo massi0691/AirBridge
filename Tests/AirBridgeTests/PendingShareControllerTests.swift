@@ -328,18 +328,19 @@ final class PendingShareControllerTests: XCTestCase {
         XCTAssertTrue(exists(impostor))
     }
 
-    func test_prune_reportsError_whenContainerUnreadable() {
+    func test_prune_treatsMissingPendingSharesAsNormal() {
         let controller = controller()
-        let missingContainer = FileManager.default.temporaryDirectory
-            .appendingPathComponent("container-absente-\(UUID().uuidString)")
 
+        // Le conteneur existe, mais l'extension n'a encore jamais créé sa
+        // boîte `PendingShares/` : il n'y a rien à purger et aucune erreur
+        // ne doit remonter.
         let result = controller.pruneDeliveredBatches(
             deliveredSourceURLs: [],
-            containerURL: missingContainer
+            containerURL: containerURL
         )
 
         XCTAssertEqual(result.deletedFiles, 0)
         XCTAssertEqual(result.removedBatchDirectories, 0)
-        XCTAssertEqual(result.errors.count, 1, "L'échec de lecture doit être remonté, pas avalé.")
+        XCTAssertTrue(result.errors.isEmpty)
     }
 }
