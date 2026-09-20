@@ -29,6 +29,14 @@
 	<array>
 		<string>_airbridge._tcp</string>
 	</array>
+	<!--
+		Obligatoire avec NSBonjourServices : sans ce texte, iOS (14+)
+		n'affiche jamais la demande d'accès au réseau local et la
+		découverte Bonjour échoue silencieusement (radar vide).
+		Également affiché par macOS (Sequoia+) et visionOS.
+	-->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>AirBridge utilise le réseau local pour détecter les appareils à proximité et transférer vos fichiers directement, sans passer par Internet.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

@@ -10,6 +10,7 @@
 import AppKit
 import Foundation
 import UniformTypeIdentifiers
+import os
 
 /// Point d'entrée de l'extension de partage macOS.
 ///
@@ -37,6 +38,17 @@ final class MacOSShareViewController: NSViewController {
 
     /// Conteneur App Group partagé avec l'application principale.
     private let appGroupIdentifier = "group.com.airbridge.shared"
+
+    /// [DIAG-TEMP FinderService] Logger de diagnostic temporaire pour
+    /// tracer le handoff Finder → extension → app dans Console.app
+    /// (sous-système com.airbridge, catégorie finder.service.diag).
+    /// À retirer une fois l'intégration Finder validée sur machine réelle.
+    /// `nonisolated` : consulté aussi depuis les callbacks de
+    /// `NSItemProvider` (thread arbitraire) ; `Logger` est Sendable.
+    private nonisolated static let diag = Logger(
+        subsystem: "com.airbridge",
+        category: "finder.service.diag"
+    )
 
     /// Verrou : `beginRequest(with:)` peut être rappelé par le système sur
     /// un même cycle de vie ; on ne traite qu'une seule demande.
@@ -193,6 +205,23 @@ final class MacOSShareViewController: NSViewController {
         var copiedURLs: [URL] = []
         let extensionItems = context.inputItems as? [NSExtensionItem] ?? []
 
+        // [DIAG-TEMP FinderService] inventaire de ce que le Finder a fourni.
+        let attachmentCounts = extensionItems
+            .map { $0.attachments?.count ?? 0 }
+            .description
+        Self.diag.info(
+            "[DIAG-TEMP] beginRequest — \(extensionItems.count) NSExtensionItem, attachments : \(attachmentCounts, privacy: .public)"
+        )
+        for (itemIndex, item) in extensionItems.enumerated() {
+            for (providerIndex, provider) in (item.attachments ?? []).enumerated() {
+                let types = provider.registeredTypeIdentifiers
+                    .joined(separator: ", ")
+                Self.diag.info(
+                    "[DIAG-TEMP] item \(itemIndex) provider \(providerIndex) types : \(types, privacy: .public)"
+                )
+            }
+        }
+
         for item in extensionItems {
             for provider in item.attachments ?? [] {
                 guard !Task.isCancelled else {
@@ -213,18 +242,43 @@ final class MacOSShareViewController: NSViewController {
                     showErrorState("Impossible de lire le fichier sélectionné.")
                     return
                 }
-                guard let sourceURL else { continue }
+                // [DIAG-TEMP FinderService] résultat de l'extraction.
+                Self.diag.info(
+                    "[DIAG-TEMP] extraction public.file-url → \(sourceURL?.path ?? "nil", privacy: .public)"
+                )
 
+                if let sourceURL {
+                    do {
+                        let destURL = try await copyToBatchDirectory(
+                            sourceURL,
+                            in: batchDirectory
+                        )
+                        copiedURLs.append(destURL)
+                        print("✅ Copié : \(destURL.lastPathComponent)")
+                    } catch {
+                        cleanupIncompleteBatch()
+                        showErrorState("Échec de la copie de \(sourceURL.lastPathComponent).")
+                        return
+                    }
+                    continue
+                }
+
+                // Repli : le Finder peut n'enregistrer que l'UTI du CONTENU
+                // (public.jpeg, com.adobe.pdf…) sans public.file-url. On
+                // demande alors une représentation FICHIER du type
+                // réellement enregistré ; la copie a lieu dans le handler
+                // (le temporaire remis n'est valide que pendant celui-ci).
                 do {
-                    let destURL = try await copyToBatchDirectory(
-                        sourceURL,
-                        in: batchDirectory
-                    )
-                    copiedURLs.append(destURL)
-                    print("✅ Copié : \(destURL.lastPathComponent)")
+                    if let destURL = try await copyFileRepresentation(
+                        from: provider,
+                        into: batchDirectory
+                    ) {
+                        copiedURLs.append(destURL)
+                        print("✅ Copié (repli représentation) : \(destURL.lastPathComponent)")
+                    }
                 } catch {
                     cleanupIncompleteBatch()
-                    showErrorState("Échec de la copie de \(sourceURL.lastPathComponent).")
+                    showErrorState("Impossible de lire le fichier sélectionné.")
                     return
                 }
             }
@@ -245,7 +299,12 @@ final class MacOSShareViewController: NSViewController {
             let manifestURL = batchDirectory
                 .appendingPathComponent("manifest.json")
             try data.write(to: tmpURL, options: .atomic)
-            try FileManager.default.removeItem(at: manifestURL)
+            // Reliquat éventuel (re-publication) : suppression best-effort.
+            // Un `try` strict échoue (NSFileNoSuchFileError) sur un lot
+            // neuf — le manifeste n'existe jamais encore — et ferait
+            // systématiquement avorter le handoff. Aligné sur iOS
+            // (ShareViewController.publishManifest).
+            try? FileManager.default.removeItem(at: manifestURL)
             try FileManager.default.moveItem(at: tmpURL, to: manifestURL)
         } catch {
             cleanupIncompleteBatch()
@@ -260,7 +319,14 @@ final class MacOSShareViewController: NSViewController {
         // 4. Ouverture de l'app avec l'identifiant du lot uniquement.
         var opened = false
         if let appURL = AirBridgeURLScheme.makeReceiveURL(batchID: batchID) {
+            // [DIAG-TEMP FinderService] URL scheme utilisée + résultat.
+            Self.diag.info(
+                "[DIAG-TEMP] handoff : \(copiedURLs.count) fichier(s) copié(s), ouverture \(appURL.absoluteString, privacy: .public)"
+            )
             opened = NSWorkspace.shared.open(appURL)
+            Self.diag.info(
+                "[DIAG-TEMP] NSWorkspace.open → \(opened ? "ok" : "refusée", privacy: .public)"
+            )
         }
         print("📲 Ouverture d'AirBridge : \(opened ? "ok" : "refusée")")
 
@@ -353,6 +419,12 @@ final class MacOSShareViewController: NSViewController {
     ///   fichier compatible.
     private func loadFileURL(from provider: NSItemProvider) async throws -> URL? {
         guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else {
+            // [DIAG-TEMP FinderService] provider sans public.file-url.
+            let types = provider.registeredTypeIdentifiers
+                .joined(separator: ", ")
+            Self.diag.warning(
+                "[DIAG-TEMP] provider sans public.file-url — types enregistrés : \(types, privacy: .public)"
+            )
             return nil
         }
 
@@ -363,16 +435,98 @@ final class MacOSShareViewController: NSViewController {
                     return
                 }
 
-                if let url = item as? URL, url.isFileURL {
-                    continuation.resume(returning: url)
-                } else {
-                    // Certains providers remontent des données brutes au
-                    // lieu d'une URL : sans nom de fichier fiable on les
-                    // ignore (l'extraction échouera si aucun fichier).
+                // [DIAG-TEMP FinderService] forme runtime réelle de l'item.
+                let itemKind = item.map { String(describing: type(of: $0)) } ?? "nil"
+                Self.diag.info(
+                    "[DIAG-TEMP] loadItem(public.file-url) → \(itemKind, privacy: .public)"
+                )
+
+                // Le Finder (macOS) livre le plus souvent `public.file-url`
+                // sous forme de `Data` (octets de l'URL sérialisée), pas de
+                // `URL`/`NSURL` : le cast direct échouait silencieusement et
+                // la sélection ressortait vide (« Aucun fichier à partager »).
+                // On accepte donc les trois formes réelles : URL, Data, String.
+                continuation.resume(returning: Self.fileURL(fromLoadedItem: item))
+            }
+        }
+    }
+
+    /// Décode l'item `public.file-url` remonté par `loadItem`, quelle que
+    /// soit sa forme runtime (`NSURL`, `Data` d'URL sérialisée, `String`).
+    /// `nonisolated` : appelé depuis le callback de `NSItemProvider`
+    /// (thread arbitraire) ; fonction pure, sans état partagé.
+    /// - Returns: URL de fichier, ou nil si l'item n'en représente pas une.
+    private nonisolated static func fileURL(fromLoadedItem item: NSSecureCoding?) -> URL? {
+        if let url = item as? URL {
+            return url.isFileURL ? url : nil
+        }
+        if let data = item as? Data {
+            if let url = URL(dataRepresentation: data, relativeTo: nil),
+               url.isFileURL {
+                return url
+            }
+            if let string = String(data: data, encoding: .utf8),
+               let url = URL(string: string),
+               url.isFileURL {
+                return url
+            }
+            return nil
+        }
+        if let string = item as? String,
+           let url = URL(string: string),
+           url.isFileURL {
+            return url
+        }
+        return nil
+    }
+
+    /// Repli d'extraction quand le provider n'expose pas `public.file-url` :
+    /// demande une représentation FICHIER du premier type enregistré qui en
+    /// fournit une (`loadFileRepresentation`). L'URL remise au handler est
+    /// temporaire et détruite à son retour : la copie vers le lot est donc
+    /// faite DANS le handler, pas après.
+    /// - Returns: URL de la copie dans le lot, ou nil si aucun type ne
+    ///   fournit de fichier.
+    private func copyFileRepresentation(
+        from provider: NSItemProvider,
+        into directory: URL
+    ) async throws -> URL? {
+        for typeIdentifier in provider.registeredTypeIdentifiers {
+            // [DIAG-TEMP FinderService] tentative de repli par type.
+            Self.diag.info(
+                "[DIAG-TEMP] repli loadFileRepresentation(\(typeIdentifier, privacy: .public))"
+            )
+
+            let result: URL? = try await withCheckedThrowingContinuation { continuation in
+                provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) { url, error in
+                    if let url, url.isFileURL {
+                        do {
+                            let destURL = Self.uniqueDestinationURL(
+                                in: directory,
+                                named: url.lastPathComponent
+                            )
+                            try FileManager.default.copyItem(at: url, to: destURL)
+                            continuation.resume(returning: destURL)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                        return
+                    }
+                    // Pas de représentation fichier pour CE type : on
+                    // essaiera le suivant (nil sans erreur bloquante).
                     continuation.resume(returning: nil)
                 }
             }
+
+            if let result {
+                // [DIAG-TEMP FinderService] repli réussi.
+                Self.diag.info(
+                    "[DIAG-TEMP] repli réussi → \(result.lastPathComponent, privacy: .public)"
+                )
+                return result
+            }
         }
+        return nil
     }
 
     /// Copie la ressource security-scoped vers le répertoire du lot, avec
@@ -426,6 +580,16 @@ final class MacOSShareViewController: NSViewController {
     /// Génère une destination unique : si le nom existe déjà, on préfixe
     /// avec un compteur ("1_toto.txt", "2_toto.txt", …).
     private func uniqueDestination(in directory: URL, named name: String) -> URL {
+        Self.uniqueDestinationURL(in: directory, named: name)
+    }
+
+    /// Variante `nonisolated` de `uniqueDestination` — appelable depuis les
+    /// handlers de `NSItemProvider` (thread arbitraire) ; fonction pure
+    /// hormis les lectures FileManager.
+    private nonisolated static func uniqueDestinationURL(
+        in directory: URL,
+        named name: String
+    ) -> URL {
         let fileManager = FileManager.default
         let base = name.isEmpty ? "fichier" : name
         var candidate = directory.appendingPathComponent(base)

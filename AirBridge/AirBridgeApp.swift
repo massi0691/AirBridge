@@ -196,18 +196,6 @@ struct AirBridgeApp: App {
                 }
             }
         }
-
-        // Envoyer une notification de test au démarrage pour valider le pipeline
-        let manager = notificationManager
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 secondes
-            print("📢 Envoi notification de test au démarrage")
-            manager.notifyTransferCompleted(
-                direction: .received,
-                fileCount: 1,
-                deviceName: "Test Appareil"
-            )
-        }
     }
 
     var body: some Scene {
