@@ -10,10 +10,12 @@ final class AuthenticationPolicyTests: XCTestCase {
 
     // MARK: - Compatibilité v1
 
-    /// En v1, la signature n'existait pas. Tous les messages de contrôle
-    /// doivent donc être acceptés en mode permissif, quel que soit le type
-    /// ou l'état de confiance du pair.
-    func testV1OptionalLegacy() {
+    /// La v1 est définitivement désactivée (`ProtocolCompatibility.
+    /// minimumSupportedVersion == 2`) : un message annonçant une version
+    /// antérieure ne bénéficie d'aucun mode permissif. La politique exige
+    /// une signature qu'aucun pair v1 ne peut fournir, ce qui revient à un
+    /// refus — et empêche un downgrade silencieux depuis une session v2.
+    func testV1IsNeverPermissive() {
         // Messages de contrôle représentatifs
         let controlTypes: [AirBridgeMessageType] = [
             .hello,
@@ -35,8 +37,8 @@ final class AuthenticationPolicyTests: XCTestCase {
                     )
                     XCTAssertEqual(
                         requirement,
-                        .optionalLegacy,
-                        "En v1, \(type) avec pair=\(trustState) cléMatch=\(keyMatches) doit rester permissif"
+                        .required,
+                        "En v1, \(type) avec pair=\(trustState) cléMatch=\(keyMatches) doit rester strict (aucun mode permissif)"
                     )
                 }
             }
@@ -121,16 +123,20 @@ final class AuthenticationPolicyTests: XCTestCase {
         XCTAssertEqual(requirement, .required)
     }
 
-    /// Un pair explicitement bloqué doit être rejeté avec exigence de
-    /// signature (qui échouera puisque le store ne valide pas les bloqués).
-    func testV2BlockedPeerRequired() {
-        let requirement = AuthenticationPolicy.authenticationRequirement(
-            for: .transferRequest,
-            protocolVersion: 2,
-            peerTrustState: .blocked,
-            peerPublicKeyMatches: false
-        )
-        XCTAssertEqual(requirement, .required)
+    /// Un pair explicitement bloqué ne fait plus progresser aucune session :
+    /// la politique renvoie `.forbidden`, que la signature soit valide ou
+    /// non. C'est plus strict que `.required` — le message n'est même pas
+    /// vérifié.
+    func testV2BlockedPeerForbidden() {
+        for keyMatches in [true, false] {
+            let requirement = AuthenticationPolicy.authenticationRequirement(
+                for: .transferRequest,
+                protocolVersion: 2,
+                peerTrustState: .blocked,
+                peerPublicKeyMatches: keyMatches
+            )
+            XCTAssertEqual(requirement, .forbidden)
+        }
     }
 
     // MARK: - v2 : pair unknown + messages de premier contact
@@ -171,7 +177,6 @@ final class AuthenticationPolicyTests: XCTestCase {
     /// message : c'est le comportement attendu.
     func testV2UnknownPeerOtherRequired() {
         let prePairingForbiddenTypes: [AirBridgeMessageType] = [
-            .transferRequest,
             .transferAccepted,
             .transferRejected,
             .transferCompleted,
@@ -195,6 +200,38 @@ final class AuthenticationPolicyTests: XCTestCase {
                 "\(type) avec pair unknown hors liste blanche doit exiger une signature (qui sera rejetée faute de clé)"
             )
         }
+    }
+
+    /// Un pair inconnu **peut** annoncer un transfert : `transferRequest`
+    /// figure dans la liste blanche du premier contact, la signature est
+    /// vérifiée contre la clé annoncée puis la confirmation utilisateur
+    /// décide. En revanche sa réponse (`transferAccepted`) exige une clé
+    /// déjà enregistrée — d'où la barrière de pairage côté émetteur
+    /// (`AirBridgeCore.sendApprovalRequestIfNeeded`), sans laquelle
+    /// l'acceptation du destinataire était écartée et l'envoi restait
+    /// « En attente ».
+    func testV2UnknownPeerCanRequestButNotAcceptTransfer() {
+        XCTAssertEqual(
+            AuthenticationPolicy.authenticationRequirement(
+                for: .transferRequest,
+                protocolVersion: 2,
+                peerTrustState: .unknown,
+                peerPublicKeyMatches: false
+            ),
+            .requiredForKnownPeer,
+            "Une annonce de transfert d'un pair inconnu s'appuie sur la clé annoncée"
+        )
+
+        XCTAssertEqual(
+            AuthenticationPolicy.authenticationRequirement(
+                for: .transferAccepted,
+                protocolVersion: 2,
+                peerTrustState: .unknown,
+                peerPublicKeyMatches: false
+            ),
+            .required,
+            "L'acceptation d'un pair inconnu exige une clé persistée (donc rejetée)"
+        )
     }
 
     // MARK: - Helper isSensitiveControlMessage

@@ -640,7 +640,15 @@ final class IncomingTransferManager {
 
         // La taille réelle du `.partial` reste consultable après fermeture
         // via `partialFileBytes(transferID:)`, même sans writer ouvert.
-        store.updateProgress(
+        //
+        // `store.markInterrupted` et NON `store.updateProgress` : ce dernier
+        // force l'état `.transferring`, ce qui **ressuscitait** une réception
+        // déjà interrompue par une coupure réseau (`AirBridgeCore` marque
+        // `.interrupted` avant d'appeler ce chemin). Un transfert revenu à
+        // `.transferring` n'était plus reprisable : la campagne de reprise
+        // automatique ne sélectionne que les états `.interrupted`, et l'UI
+        // affichait « En cours » figé au lieu d'« Interrompu ».
+        store.markInterrupted(
             transferID: transferID,
             transferredBytes: partialFileBytes(transferID: transferID)
         )

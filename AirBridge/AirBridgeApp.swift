@@ -237,7 +237,8 @@ struct AirBridgeApp: App {
                 SettingsView(
                     receivedFolderStore: coreHolder.core.receivedFolderStore,
                     notificationManager: coreHolder.core.notificationManager,
-                    pairingStore: coreHolder.core.pairingStore
+                    pairingStore: coreHolder.core.pairingStore,
+                    core: coreHolder.core
                 )
                 .frame(minWidth: 520, minHeight: 460)
             } else {

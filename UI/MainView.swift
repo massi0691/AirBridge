@@ -218,7 +218,8 @@ private extension MainView {
                 receivedFolderStore:
                     core.receivedFolderStore,
                 notificationManager: core.notificationManager,
-                pairingStore: core.pairingStore
+                pairingStore: core.pairingStore,
+                core: core
             )
         }
     }

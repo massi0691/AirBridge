@@ -318,7 +318,8 @@ struct MacTransferWorkspaceView: View {
         SettingsView(
             receivedFolderStore: core.receivedFolderStore,
             notificationManager: core.notificationManager,
-            pairingStore: core.pairingStore
+            pairingStore: core.pairingStore,
+            core: core
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Réglages")
