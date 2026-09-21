@@ -48,8 +48,15 @@ nonisolated enum NetworkErrorClassifier {
                 // Emballage d'une erreur d'envoi : c'est la cause brute qui
                 // décide (ECONNRESET → récupérable, cause métier → non).
                 return isRecoverableNetworkInterruption(underlying)
-            case .noActiveConnection, .sourceNotFound, .fileNotFound:
-                // Gardes de session ou de source : la liaison est perdue,
+            case .noActiveConnection, .secureSessionNotReady:
+                // Gardes de session : la liaison sécurisée n'est pas encore
+                // disponible ou vient de tomber (clé ECDH / sessionId absents,
+                // connexion perdue). Les octets déjà transférés restent
+                // reprenables une fois la session rétablie — même traitement
+                // que `ConnectionManagerError` ci-dessus.
+                return true
+            case .sourceNotFound, .fileNotFound:
+                // Gardes de source : la source a été libérée avec la session,
                 // mais rien n'invalide les octets déjà transférés.
                 return true
             }
