@@ -59,6 +59,13 @@ nonisolated enum NetworkErrorClassifier {
                 // Gardes de source : la source a été libérée avec la session,
                 // mais rien n'invalide les octets déjà transférés.
                 return true
+            default:
+                // Cas non répertorié (le switch reste exhaustif si
+                // `OutgoingTransferManagerError` s'enrichit) : rien ne prouve
+                // une perte de liaison, on applique donc la règle par défaut
+                // de la fonction — échec définitif — plutôt qu'une reprise
+                // vouée à rééchouer à l'identique.
+                return false
             }
         }
 
