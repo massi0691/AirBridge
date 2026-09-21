@@ -39,7 +39,6 @@ final class OutgoingTransferManager {
     }
 
     private let store: TransferStore
-    private let messageCodec = MessageCodec()
     /// `FrameCodec` réutilisé entre envois : l'instancier par chunk
     /// allouait inutilement. `FrameCodec` est sans état (struct), donc
     /// sûr à partager entre threads.
@@ -47,18 +46,18 @@ final class OutgoingTransferManager {
     private let localDevice: Device
     private var connection: NWConnection?
 
-    /// Version du protocole négociée (défaut v1, passe à v2 après handshake)
-    private var negotiatedProtocolVersion: Int = 1
+    /// Version du protocole négociée. La valeur initiale est déjà v2 afin
+    /// qu'un transfert ne puisse jamais se rabattre implicitement vers v1.
+    /// La file reste toutefois bloquée tant que la clé ECDH n'est pas prête.
+    private var negotiatedProtocolVersion: Int = ProtocolCompatibility.currentVersion
 
     /// Identifiant de session actif (généré au handshake sécurisé).
     /// Utilisé pour lier les chunks binaires v2 à la session courante.
     private var sessionId: UUID? = nil
 
-    /// Chiffreur de flux optionnel : en mode transparent tant qu'aucune
-    /// clé n'est installée (ChunkStreamCipher retournant plaintext tel
-    /// quel). Une fois la clé dérivée du handshake ECDH P-256 installée
-    /// via `installSessionKey(_:)`, chaque chunk binaire v2 est scellé
-    /// par ChaCha20-Poly1305 avant d'être encodé dans la trame réseau.
+    /// Chiffreur de flux. Un snapshot sans clé est inutilisable par le
+    /// chemin réseau : le pipeline refuse alors le transfert au lieu de
+    /// transporter les données en clair.
     private var chunkCipher: ChunkStreamCipher = ChunkStreamCipher()
 
     // File sources
@@ -66,6 +65,7 @@ final class OutgoingTransferManager {
 
     enum OutgoingTransferManagerError: Error {
         case noActiveConnection
+        case secureSessionNotReady
         case sourceNotFound
         case encodingError(Error)
         /// Échec de l'envoi réseau lui-même (ECONNRESET, ECANCELED, erreur
@@ -107,9 +107,13 @@ final class OutgoingTransferManager {
         self.chunkCipher = ChunkStreamCipher(key: key)
     }
 
-    /// Réinitialise le chiffreur en mode transparent (clé oubliée).
+    /// Réinitialise la session cryptographique. Cette méthode est appelée
+    /// à chaque fermeture de connexion pour éviter qu'une clé d'une
+    /// session précédente soit réutilisée.
     func clearSessionKey() {
         self.chunkCipher = ChunkStreamCipher()
+        self.sessionId = nil
+        self.negotiatedProtocolVersion = ProtocolCompatibility.currentVersion
     }
 
     // MARK: - Chunk Sending (Pipeline géré par TransferManager)
@@ -206,64 +210,38 @@ final class OutgoingTransferManager {
         let cipher = snapshot.cipher
         let encodeStart = Date()
 
-        let frame: Data
-        if protocolVersion >= 2 {
-            // Calcul du chunkIndex : entier séquentiel basé sur l'offset
-            // et la taille de chunk négociée. Cohérent avec le calcul
-            // côté réception (même fonction de dérivation). Le
-            // `chunkIndex` est intégré à l'AAD du `ChunkStreamCipher` :
-            // déplacer un chunk d'un offset à l'autre invalide le tag.
-            let chunkIndex: UInt32 = {
-                guard chunkSize > 0 else { return UInt32(offset >> 32) }
-                return UInt32(offset / Int64(chunkSize))
-            }()
-
-            // 1. Chiffrement du payload de chunk (transparent si pas de clé).
-            let activeSession = sessionId ?? UUID()
-            let encryptedData = cipher.encrypt(
-                data,
-                transferID: transferID,
-                chunkIndex: chunkIndex,
-                sessionId: activeSession
-            )
-
-            // 2. Encodage binaire du chunk avec les octets chiffrés.
-            //    Le `length` dans l'en-tête binaire est la taille des
-            //    octets effectivement transportés (chiffrés), ce qui
-            //    permet au récepteur de borner la lecture.
-            let binaryChunk = BinaryFileChunkPayload(
-                transferID: transferID,
-                offset: offset,
-                data: encryptedData,
-                isLastChunk: isLastChunk,
-                sessionId: activeSession
-            )
-            let payloadData = binaryChunk.encode()
-            frame = try frameCodec.encode(payloadData)
-        } else {
-            // v1 : chemin JSON (conservé pour la compatibilité ascendante)
-            let payload = FileChunkPayload(
-                transferID: transferID,
-                offset: offset,
-                data: data,
-                isLastChunk: isLastChunk
-            )
-            let payloadData = try JSONEncoder().encode(payload)
-            // Construction d'un AirBridgeMessage v1 (en-tête JSON standard)
-            let message = AirBridgeMessage(
-                protocolVersion: protocolVersion,
-                type: .fileChunk,
-                sender: Device(
-                    id: UUID(),
-                    name: "",
-                    model: "",
-                    systemVersion: ""
-                ),
-                payload: payloadData
-            )
-            let messageData = try JSONEncoder().encode(message)
-            frame = try frameCodec.encode(messageData)
+        guard protocolVersion >= ProtocolCompatibility.currentVersion,
+              let activeSession = sessionId,
+              cipher.hasKey else {
+            throw OutgoingTransferManagerError.secureSessionNotReady
         }
+
+        guard chunkSize > 0 else {
+            throw OutgoingTransferManagerError.encodingError(
+                ChunkStreamCipherError.encryptionFailed
+            )
+        }
+
+        // v2 uniquement : le chunkIndex est intégré à l'AAD et la clé
+        // ECDH est obligatoire. Il n'existe plus de chemin JSON/base64 v1
+        // ni de fallback en clair.
+        let chunkIndex = UInt32(offset / Int64(chunkSize))
+        let encryptedData = try cipher.encryptChecked(
+            data,
+            transferID: transferID,
+            chunkIndex: chunkIndex,
+            sessionId: activeSession
+        )
+
+        let binaryChunk = BinaryFileChunkPayload(
+            transferID: transferID,
+            offset: offset,
+            data: encryptedData,
+            isLastChunk: isLastChunk,
+            sessionId: activeSession
+        )
+        let payloadData = binaryChunk.encode()
+        let frame = try frameCodec.encode(payloadData)
 
         let encodeDuration = Date().timeIntervalSince(encodeStart)
         let sendStart = Date()
@@ -304,96 +282,44 @@ final class OutgoingTransferManager {
             return
         }
 
-        let encodeStart = Date()
-
-        // v2+ : format binaire direct (pas de JSON/base64)
-        // v1 : JSON/base64 (compatibilité)
-        let payloadData: Data
-        do {
-            if negotiatedProtocolVersion >= 2 {
-                // chunkIndex cohérent avec la version async.
-                let chunkIndex: UInt32 = {
-                    guard chunkSize > 0 else { return UInt32(offset >> 32) }
-                    return UInt32(offset / Int64(chunkSize))
-                }()
-
-                let activeSession = sessionId ?? UUID()
-                let encryptedData = chunkCipher.encrypt(
-                    data,
-                    transferID: transferID,
-                    chunkIndex: chunkIndex,
-                    sessionId: activeSession
-                )
-
-                let binaryChunk = BinaryFileChunkPayload(
-                    transferID: transferID,
-                    offset: offset,
-                    data: encryptedData,
-                    isLastChunk: isLastChunk,
-                    sessionId: activeSession
-                )
-                payloadData = binaryChunk.encode()
-
-                // Pour v2+: envoyer un frame binaire direct (pas d'AirBridgeMessage JSON)
-                // Format: [FrameHeader][BinaryFileChunkPayload]
-                let frame = try frameCodec.encode(payloadData)
-
-                let encodeDuration = Date().timeIntervalSince(encodeStart)
-                let sendStart = Date()
-
-                // `completion` est invoquée exactement une fois par le
-                // framework Network, sur sa propre file, avant que cet envoi
-                // ne soit terminé : la copie explicitement non isolée ne
-                // crée aucune course de données.
-                nonisolated(unsafe) let completion = completion
-
-                connection.send(
-                    content: frame,
-                    completion: .contentProcessed { error in
-                        if let error {
-                            // L'erreur brute est propagée sous `.sendError` :
-                            // l'emballer dans `.encodingError` la ferait
-                            // classer comme échec définitif, alors qu'une
-                            // coupure réseau reste reprisable.
-                            self.logger.error("Erreur d'envoi fileChunk v2 : \(error.localizedDescription, privacy: .public)")
-                            completion(.failure(OutgoingTransferManagerError.sendError(error)))
-                            return
-                        }
-                        TransferPerformanceLog.recordSend(
-                            transferID: transferID,
-                            bytes: Int64(data.count),
-                            encodeTime: encodeDuration,
-                            sendTime: Date().timeIntervalSince(sendStart)
-                        )
-                        completion(.success(()))
-                    }
-                )
-                return
-            } else {
-                let payload = FileChunkPayload(
-                    transferID: transferID,
-                    offset: offset,
-                    data: data,
-                    isLastChunk: isLastChunk
-                )
-                payloadData = try messageCodec.encodePayload(payload)
-            }
-        } catch {
-            logger.error("Impossible d'encoder fileChunk : \(error.localizedDescription, privacy: .public)")
-            completion(.failure(OutgoingTransferManagerError.encodingError(error)))
+        guard negotiatedProtocolVersion >= ProtocolCompatibility.currentVersion,
+              let activeSession = sessionId,
+              chunkCipher.hasKey,
+              chunkSize > 0 else {
+            completion(.failure(OutgoingTransferManagerError.secureSessionNotReady))
             return
         }
 
-        // v1: utiliser le format JSON standard
-        // Important: utiliser la version négociée, pas la version courante par défaut
-        let message = AirBridgeMessage(
-            protocolVersion: negotiatedProtocolVersion,
-            type: .fileChunk,
-            sender: localDevice,
-            payload: payloadData
-        )
-
-        send(message, on: connection, completion: completion)
+        do {
+            let chunkIndex = UInt32(offset / Int64(chunkSize))
+            let encryptedData = try chunkCipher.encryptChecked(
+                data,
+                transferID: transferID,
+                chunkIndex: chunkIndex,
+                sessionId: activeSession
+            )
+            let binaryChunk = BinaryFileChunkPayload(
+                transferID: transferID,
+                offset: offset,
+                data: encryptedData,
+                isLastChunk: isLastChunk,
+                sessionId: activeSession
+            )
+            let frame = try frameCodec.encode(binaryChunk.encode())
+            nonisolated(unsafe) let completion = completion
+            connection.send(
+                content: frame,
+                completion: .contentProcessed { error in
+                    if let error {
+                        completion(.failure(OutgoingTransferManagerError.sendError(error)))
+                        return
+                    }
+                    completion(.success(()))
+                }
+            )
+        } catch {
+            completion(.failure(OutgoingTransferManagerError.encodingError(error)))
+        }
     }
 
     // MARK: - File Source Management
@@ -464,36 +390,10 @@ final class OutgoingTransferManager {
         }
     }
 
-    // MARK: - Private Network Send
+    // Les chunks v2 sont envoyés exclusivement par les deux chemins
+    // chiffrés ci-dessus (`sendChunkOverConnectionStatic` et
+    // `sendChunkImmediately`). Aucun encodeur de message générique ne
+    // doit rester ici : il pourrait contourner la signature des contrôles
+    // ou le chiffrement obligatoire.
 
-    private func send(
-        _ message: AirBridgeMessage,
-        on connection: NWConnection,
-        completion: @escaping (Result<Void, Error>) -> Void
-    ) {
-        do {
-            let messageData = try messageCodec.encode(message)
-            // Réutilisation de l'instance `frameCodec` : instancier
-            // `FrameCodec()` à chaque envoi allouait inutilement.
-            let frame = try frameCodec.encode(messageData)
-
-            // La complétion est appelée une seule fois, par la file du
-            // framework Network : la copie explicitement non isolée ne crée
-            // aucune course de données.
-            nonisolated(unsafe) let completion = completion
-
-            connection.send(
-                content: frame,
-                completion: .contentProcessed { error in
-                    if let error {
-                        completion(.failure(error))
-                        return
-                    }
-                    completion(.success(()))
-                }
-            )
-        } catch {
-            completion(.failure(error))
-        }
-    }
 }

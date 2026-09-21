@@ -10,9 +10,9 @@ import Foundation
 /// Niveau d'authentification requis pour accepter un message de contrôle.
 ///
 /// Cette énumération décrit, pour un message donné, l'effort d'authentification
-/// attendu : obligation stricte, obligation adoucie pour les pairs déjà
-/// connus, acceptation sans signature pour la compatibilité ascendante, ou
-/// interdiction pure et simple d'un type de message particulier.
+/// attendu : obligation stricte, obligation adoucie pour le premier contact,
+/// ou interdiction pure et simple d'un type de message particulier. La valeur
+/// historique `optionalLegacy` n'est plus permissive.
 enum AuthenticationRequirement: Sendable, Equatable {
 
     /// Le message doit porter une signature valide contre la clé publique
@@ -25,9 +25,9 @@ enum AuthenticationRequirement: Sendable, Equatable {
     /// contact, où le pair n'a pas encore été persisté).
     case requiredForKnownPeer
 
-    /// Le message est accepté même s'il n'est pas signé. Réservé à la
-    /// compatibilité ascendante avec les pairs v1 qui n'embarquaient pas
-    /// de signature sur leurs messages de contrôle.
+    /// Ancienne valeur conservée pour la compatibilité source. Elle n'est
+    /// jamais produite par la policy v2 et `MessageAuthenticator` refuse
+    /// également un message non signé dans ce mode.
     case optionalLegacy
 
     /// Le message ne doit jamais être traité sur cette version de
@@ -44,19 +44,16 @@ enum AuthenticationRequirement: Sendable, Equatable {
 /// du pair dans le `PairingStore`, et de la cohérence entre la clé publique
 /// annoncée et celle persistée.
 ///
-/// L'objectif est double :
-/// 1. **Préserver la compatibilité v1** : un pair v1 (sans signature) doit
-///    continuer à pouvoir dialoguer avec cette application tant qu'il n'a
-///    pas migré. Tous les messages de contrôle v1 sont donc marqués
-///    `optionalLegacy`.
-/// 2. **Durcir progressivement la v2** : un pair v2 annoncé ne peut émettre
-///    de message de contrôle *non signé* (sauf cas explicitement listé
-///    pour le premier contact) ni de `fileChunk` (le flux binaire est
-///    protégé globalement par le `transferCompleted`).
+/// L'objectif est strict : la v2 est la seule version acceptée et aucun
+/// contrôle non signé ne doit être traité. Un pair inconnu peut uniquement
+/// présenter une identité signée (et demander un transfert soumis à
+/// approbation) ; toutes les mutations suivantes exigent la clé persistée.
+/// Les `fileChunk` sont traités par le chiffrement de session et ne passent
+/// jamais par la vérification de signature par message.
 ///
 /// Le résultat de cette politique est ensuite appliqué par le vérificateur
 /// de signature, qui choisit entre « vérifier contre la clé du store »,
-/// « vérifier contre la clé annoncée » ou « accepter en mode permissif ».
+/// « vérifier contre la clé annoncée » ou refuser.
 ///
 /// `nonisolated` : ce type est une table de règles pures, consultée depuis
 /// le cœur `@MainActor` comme depuis du code hors acteur principal
@@ -99,9 +96,9 @@ nonisolated enum AuthenticationPolicy {
     ///
     /// Pendant la phase de découverte initiale, un pair n'est pas encore
     /// enregistré dans le `PairingStore`. Les messages de cette liste
-    /// peuvent être vérifiés contre la clé publique *annoncée* dans le
-    /// message lui-même (clé éphémère du pair), ce qui suffit à empêcher
-    /// un rejeu ou une falsification sur le premier contact.
+    /// peuvent être vérifiés contre la clé publique long-terme
+    /// *annoncée* dans le message lui-même, ce qui suffit à authentifier
+    /// le premier contact avant sa persistance.
     ///
     /// Tous les autres messages de contrôle sensibles exigent un pair déjà
     /// connu du store ; à défaut, ils sont rejetés.
@@ -113,7 +110,12 @@ nonisolated enum AuthenticationPolicy {
         .pairingRequest,
         .pairingResponse,
         .keyExchange,
-        .keyExchangeAck
+        .keyExchangeAck,
+        // Un pair inconnu peut demander un transfert : la signature
+        // authentifie le message, puis la confirmation utilisateur décide
+        // si le transfert est accepté. Les autres mutations restent
+        // réservées à une session déjà connue.
+        .transferRequest
     ]
 
     /// Décide le niveau d'authentification requis pour un message.
@@ -134,17 +136,33 @@ nonisolated enum AuthenticationPolicy {
         peerPublicKeyMatches: Bool
     ) -> AuthenticationRequirement {
 
-        // v1 : tout message de contrôle reste en mode permissif. La
-        // signature était absente du protocole, l'exiger briserait la
-        // compatibilité ascendante.
-        if protocolVersion < 2 {
-            return .optionalLegacy
+        // Toute version antérieure à v2 est rejetée par
+        // `ProtocolCompatibility`. Ne jamais réintroduire ici une
+        // acceptation permissive : un message v1 non signé pourrait être
+        // forgé au nom d'un pair de confiance.
+        if protocolVersion < ProtocolCompatibility.currentVersion {
+            return .required
+        }
+
+        // Un pair bloqué ne doit plus faire progresser une session déjà
+        // ouverte. La signature reste techniquement valide, mais l'état
+        // métier interdit tout nouveau message avant le routage.
+        if peerTrustState == .blocked {
+            return .forbidden
         }
 
         // v2 : les chunks ne sont JAMAIS signés individuellement.
         // La chaîne est protégée par le `transferCompleted` final signé.
         if type == .fileChunk {
             return .forbidden
+        }
+
+        // Un pair déjà trusted dont la clé annoncée diverge ne doit
+        // jamais repasser par la liste blanche du premier contact. La
+        // signature sera vérifiée contre la clé persistée et échouera si
+        // la clé a réellement changé.
+        if peerTrustState == .trusted, !peerPublicKeyMatches {
+            return .required
         }
 
         // v2, message de contrôle sensible, pair trusted avec clé qui

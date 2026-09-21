@@ -27,9 +27,12 @@ nonisolated enum ProtocolCompatibility {
 
     /// Version la plus ancienne encore comprise.
     ///
-    /// La v1 utilisait JSON/base64 pour les chunks. La v2 utilise un format
-    /// binaire direct pour fileChunk (pas de base64, pas de JSON).
-    static let minimumSupportedVersion = 1
+    /// La v1 utilisait un contrôle non authentifié et un flux de chunks
+    /// non chiffré. Elle n'est volontairement plus acceptée : conserver ce
+    /// fallback permettrait un downgrade silencieux depuis une session v2.
+    /// La v2 utilise un format binaire direct pour `fileChunk` et une
+    /// session ECDH authentifiée.
+    static let minimumSupportedVersion = 2
 
     /// Vrai si un message annonçant `version` peut être décodé.
     ///

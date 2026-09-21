@@ -117,9 +117,18 @@ actor ChunkSink {
     /// n'est installée.
     private var cipher: ChunkStreamCipher = ChunkStreamCipher()
 
-    /// Taille de chunk négociée avec l'émetteur (pour le calcul de
-    /// `chunkIndex`).
+    /// Taille de chunk de secours conservée pour les tests et les anciens
+    /// appels directs. Le chemin réseau utilise `negotiatedChunkSizes`,
+    /// indexé par transfert.
     private var negotiatedChunkSize: Int = 0
+    private var negotiatedChunkSizes: [UUID: Int] = [:]
+    private var encryptionRequiredFor: Set<UUID> = []
+
+    /// Limites de mémoire indépendantes de la taille annoncée par le pair.
+    /// Une annonce de 64 Gio ne doit jamais autoriser 64 Gio de buffer RAM.
+    private let maximumPendingBytes: Int64 = 32 * 1024 * 1024
+    private let maximumPendingChunks = 128
+    private let maximumPendingGap: Int64 = 64 * 1024 * 1024
 
     // MARK: - Configuration
 
@@ -134,9 +143,20 @@ actor ChunkSink {
         self.cipher = ChunkStreamCipher()
     }
 
-    /// Mémorise la taille de chunk négociée.
+    /// Mémorise une taille de chunk de secours.
     func setNegotiatedChunkSize(_ size: Int) {
         self.negotiatedChunkSize = size
+    }
+
+    /// Mémorise la taille propre à un transfert. Elle entre dans l'AAD
+    /// indirectement via le `chunkIndex` et ne doit jamais être remplacée
+    /// par celle d'un autre fichier du même lot.
+    func setNegotiatedChunkSize(_ size: Int, for transferID: UUID) {
+        negotiatedChunkSizes[transferID] = size
+    }
+
+    func requireEncryption(for transferID: UUID) {
+        encryptionRequiredFor.insert(transferID)
     }
 
     // MARK: - Cycle de vie d'un writer
@@ -146,6 +166,8 @@ actor ChunkSink {
         let writer = try IncomingFileWriter(transferID: transferID)
         writers[transferID] = writer
         pendingChunks[transferID] = nil
+        negotiatedChunkSizes[transferID] = nil
+        encryptionRequiredFor.remove(transferID)
     }
 
     /// Rouvre un writer existant à un offset donné (cas de la
@@ -170,6 +192,8 @@ actor ChunkSink {
         writers[transferID]?.cancel()
         writers[transferID] = nil
         pendingChunks[transferID] = nil
+        negotiatedChunkSizes[transferID] = nil
+        encryptionRequiredFor.remove(transferID)
     }
 
     /// Interruption récupérable : le writer est fermé sans
@@ -187,6 +211,8 @@ actor ChunkSink {
         let activeWriters = writers
         writers.removeAll()
         pendingChunks.removeAll()
+        negotiatedChunkSizes.removeAll()
+        encryptionRequiredFor.removeAll()
         for (_, writer) in activeWriters {
             writer.cancel()
         }
@@ -224,12 +250,17 @@ actor ChunkSink {
             return .unknownTransfer
         }
 
-        // 1) Déchiffrement ChaCha20-Poly1305.
+        // 1) Déchiffrement ChaCha20-Poly1305. Pour un transfert v2,
+        // l'absence de clé est une erreur, jamais un mode transparent.
+        guard !encryptionRequiredFor.contains(transferID) || cipher.hasKey else {
+            return .decryptionFailed
+        }
+
         let plaintext: Data
         if cipher.hasKey {
             let effectiveChunkSize = chunkSize > 0
                 ? chunkSize
-                : negotiatedChunkSize
+                : (negotiatedChunkSizes[transferID] ?? negotiatedChunkSize)
             let chunkIndex: UInt32 = {
                 guard effectiveChunkSize > 0 else {
                     return UInt32(offset >> 32)
@@ -272,6 +303,16 @@ actor ChunkSink {
         if offset < writer.writtenBytes {
             return .duplicate
         } else if offset > writer.writtenBytes {
+            let pendingCount = pendingChunks[transferID]?.count ?? 0
+            let gap = offset - writer.writtenBytes
+            guard pendingCount < maximumPendingChunks,
+                  pendingBytes + Int64(plaintext.count) <= maximumPendingBytes,
+                  gap <= maximumPendingGap else {
+                writer.cancel()
+                writers[transferID] = nil
+                pendingChunks[transferID] = nil
+                return .overflow
+            }
             pendingChunks[transferID, default: [:]][offset] = plaintext
             return .buffered(writtenBytes: writer.writtenBytes)
         }
@@ -402,6 +443,8 @@ actor ChunkSink {
     func removeWriter(transferID: UUID) {
         writers[transferID] = nil
         pendingChunks[transferID] = nil
+        negotiatedChunkSizes[transferID] = nil
+        encryptionRequiredFor.remove(transferID)
     }
 
     // MARK: - Helpers

@@ -65,6 +65,10 @@ final class ConnectionManager {
     /// doivent consulter ce drapeau et non la seule présence de `session`.
     private(set) var isSessionReady = false
 
+    /// Vrai uniquement après HELLO/ACK et ECDH complétés. La présence
+    /// d'une connexion TCP ne suffit jamais à autoriser un transfert.
+    private(set) var isSecureSessionReady = false
+
     /// Dernière endpoint Bonjour réellement utilisée pour une tentative
     /// de connexion. Un échec (failed/cancelled) l'invalide : la prochaine
     /// tentative doit attendre une redécouverte fraîche plutôt que rejouer
@@ -143,17 +147,41 @@ final class ConnectionManager {
 
     enum ConnectionManagerError: Error {
         case noActiveConnection
+        case authenticationUnavailable
+        case secureSessionNotReady
         case encodingError(Error)
     }
 
     // MARK: - Protocol version tracking for v2 binary chunks
-    private var negotiatedProtocolVersion: Int = 1
+    private var negotiatedProtocolVersion: Int = ProtocolCompatibility.currentVersion
 
     /// Identifiant de session actif pour la connexion courante.
     /// Généré au handshake sécurisé (hello/ack authentifié) et utilisé
     /// pour lier les chunks binaires v2 à la session, empêchant un
     /// attaquant d'injecter des chunks d'une autre session.
     private var activeSessionId: UUID? = nil
+
+    /// Les contrôles qui mutent un transfert ne peuvent circuler qu'après
+    /// l'installation complète de la clé ECDH et du sessionId. Les messages
+    /// de découverte, de pairage et d'échange de clés restent autorisés
+    /// avant cette barrière pour pouvoir établir la session.
+    private func requiresSecureSession(for type: AirBridgeMessageType) -> Bool {
+        switch type {
+        case .transferRequest,
+             .transferAccepted,
+             .transferRejected,
+             .transferCancelled,
+             .transferCompleted,
+             .transferSucceeded,
+             .transferFailed,
+             .resumeRequest,
+             .resumeAccepted,
+             .fileChunk:
+            return true
+        default:
+            return false
+        }
+    }
 
     /// Pipeline de réception sécurisé — applique, dans l'ordre strict,
     /// les étapes d'identification, de résolution de pair, de calcul de
@@ -179,16 +207,19 @@ final class ConnectionManager {
         let pairingInfo = pairingStore.pairing(for: message.sender.id)
         let peerTrustState = pairingInfo?.trustState ?? .unknown
 
-        // 3. Récupération de la clé publique long-terme annoncée par
-        //    l'émetteur. Depuis l'ajout de `Device.publicKeyData`, le
-        //    sender embarque sa clé de signature P-256 dans chaque
-        //    message sortant, ce qui permet de vérifier les messages
-        //    sans payload de pairage (`hello`, `keyExchange`,
-        //    `keyExchangeAck`, `acknowledgement`, `ping`, `pong`).
-        //    `extractAdvertisedPublicKey` priorise `sender.publicKeyData`
-        //    puis retombe sur le payload pour la rétro-compatibilité
-        //    avec les clients v1.
+        // 3. En v2, l'enveloppe doit toujours porter la clé long-terme
+        //    du sender. Un pair sans clé ne peut pas bénéficier d'un
+        //    fallback implicite.
+        guard message.sender.publicKeyData?.isEmpty == false else {
+            logger.error("Message v2 sans clé publique long terme")
+            return false
+        }
+
         let advertisedPublicKey = extractAdvertisedPublicKey(from: message)
+        guard payloadIdentityMatchesSender(message) else {
+            logger.error("Identité du payload différente de celle du sender")
+            return false
+        }
 
         // 4. Cohérence entre la clé publique annoncée et celle persistée.
         //    Cette comparaison remplace l'ancienne valeur hardcodée `false`
@@ -224,6 +255,31 @@ final class ConnectionManager {
         }
 
         return true
+    }
+
+    /// Vérifie les champs d'identité redondants des payloads de pairage.
+    /// La clé ECDH du payload est volontairement différente de la clé de
+    /// signature du sender ; elle n'est donc pas comparée ici.
+    private func payloadIdentityMatchesSender(_ message: AirBridgeMessage) -> Bool {
+        guard let senderKey = message.sender.publicKeyData else { return false }
+
+        guard message.type == .pairingRequest
+            || message.type == .pairingResponse else {
+            return true
+        }
+
+        guard let payloadData = message.payload,
+              let payload = try? messageCodec.decodePayload(
+                PairingPayload.self,
+                from: payloadData,
+                protocolVersion: message.protocolVersion,
+                messageType: message.type
+              ) else {
+            return false
+        }
+
+        return payload.peerID == message.sender.id
+            && payload.publicKeyData == senderKey
     }
 
     /// Extrait la clé publique long-terme annoncée par l'émetteur.
@@ -338,6 +394,14 @@ final class ConnectionManager {
     }
 
     func setNegotiatedProtocolVersion(_ version: Int) {
+        guard ProtocolCompatibility.isSupported(version) else {
+            isSecureSessionReady = false
+            return
+        }
+
+        if negotiatedProtocolVersion != version {
+            isSecureSessionReady = false
+        }
         self.negotiatedProtocolVersion = version
     }
 
@@ -345,7 +409,30 @@ final class ConnectionManager {
     /// Appelé au moment du handshake sécurisé (HELLO/ACK authentifié)
     /// pour lier les chunks binaires v2 à la session.
     func setActiveSessionId(_ id: UUID?) {
+        if self.activeSessionId != id {
+            isSecureSessionReady = false
+        }
         self.activeSessionId = id
+    }
+
+    /// Marque la session comme utilisable par le protocole de transfert.
+    /// Appelé uniquement après installation effective de la clé ECDH dans
+    /// les deux gestionnaires de chunks.
+    func markSecureSessionReady() {
+        guard session != nil,
+              isSessionReady,
+              negotiatedProtocolVersion >= ProtocolCompatibility.currentVersion,
+              activeSessionId != nil else {
+            isSecureSessionReady = false
+            return
+        }
+        isSecureSessionReady = true
+    }
+
+    func resetSecureSession() {
+        isSecureSessionReady = false
+        activeSessionId = nil
+        negotiatedProtocolVersion = ProtocolCompatibility.currentVersion
     }
 
     /// Renvoie l'identifiant de session actif, ou `nil` si la session
@@ -484,7 +571,8 @@ final class ConnectionManager {
     func sendKeyExchangeAck(
         publicKey: P256.KeyAgreement.PublicKey,
         sessionId: UUID,
-        on connection: NWConnection
+        on connection: NWConnection,
+        completion: ((Result<Void, Error>) -> Void)? = nil
     ) {
         let payload = KeyExchangePayload(
             publicKey: publicKey,
@@ -497,9 +585,10 @@ final class ConnectionManager {
                 sender: localDevice,
                 payload: payloadData
             )
-            send(message, on: connection)
+            send(message, on: connection, completion: completion)
         } catch {
             logger.error("Impossible d'encoder le keyExchangeAck : \(error.localizedDescription, privacy: .public)")
+            completion?(.failure(error))
         }
     }
 
@@ -507,10 +596,11 @@ final class ConnectionManager {
     /// publique utilisée par le `AirBridgeCore` pour les messages de
     /// contrôle non encore couverts par les helpers dédiés (par
     /// exemple l'initiation du handshake ECDH).
+    @discardableResult
     func send(
         _ message: AirBridgeMessage,
         on connection: NWConnection
-    ) {
+    ) -> Bool {
         send(message, on: connection, completion: nil)
     }
 
@@ -564,6 +654,7 @@ final class ConnectionManager {
 
         session = newSession
         isSessionReady = false
+        resetSecureSession()
 
            logger.info("Session demandée vers \(discoveredDevice.device.name, privacy: .public)")
 
@@ -603,7 +694,10 @@ final class ConnectionManager {
 
                     logger.info("Session prête avec \(discoveredDevice.device.name, privacy: .public)")
 
-                    self.sendHello(on: newConnection)
+                    guard self.sendHello(on: newConnection) else {
+                        self.closeSession(newSession, state: .failed)
+                        return
+                    }
                     self.continueReceiving(on: newConnection)
                     self.onSessionReady?(newConnection)
 
@@ -712,6 +806,7 @@ final class ConnectionManager {
         closingSession.updateState(state)
         session = nil
         isSessionReady = false
+        resetSecureSession()
         stateDescription = "Déconnecté"
 
         onSessionClosed?(lostPeer)
@@ -766,6 +861,7 @@ final class ConnectionManager {
 
         session = incomingSession
         isSessionReady = false
+        resetSecureSession()
 
         incomingConnection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor [weak self] in
@@ -821,13 +917,14 @@ final class ConnectionManager {
     
     
     
-    private func sendHello(on connection: NWConnection) {
+    @discardableResult
+    private func sendHello(on connection: NWConnection) -> Bool {
         let message = AirBridgeMessage(
             type: .hello,
             sender: localDevice
         )
 
-        send(message, on: connection)
+        return send(message, on: connection)
     }
     
     
@@ -986,23 +1083,33 @@ final class ConnectionManager {
                         return
                     }
 
-                    // Un fileChunk binaire v2 ne transporte pas d'expéditeur :
-                    // son `sender` est reconstruit factice (UUID aléatoire).
-                    // Réidentifier le pair à chaque message écraserait donc la
-                    // véritable identité — et une coupure ultérieure ne saurait
-                    // plus rattacher les transferts. L'identification ne se fait
-                    // que sur les messages qui portent un sender fiable.
+                    // Un fileChunk binaire v2 ne transporte pas d'expéditeur
+                    // dans sa trame. Il doit donc être lié à l'identité déjà
+                    // validée et au `sessionId` ECDH courant.
                     let isSenderReliable = message.type != .fileChunk
 
-                    if isSenderReliable {
-                        self.session?.identifyPeer(message.sender)
+                    if isSenderReliable,
+                       let expectedPeer = self.session?.peer {
+                        guard expectedPeer.id == message.sender.id else {
+                            self.logger.error("Changement d'identité sur une session active — connexion fermée")
+                            connection.cancel()
+                            return
+                        }
+                        if let expectedKey = expectedPeer.publicKeyData,
+                           expectedKey != message.sender.publicKeyData {
+                            self.logger.error("Changement de clé sur une session active — connexion fermée")
+                            connection.cancel()
+                            return
+                        }
+                    }
 
-                        // Le HELLO est le moment où le pair devient identifiable :
-                        // mémoriser ici le dernier pair connu, pour qu'une coupure
-                        // ultérieure — même sans session restante — puisse lui
-                        // rattacher ses transferts.
-                        if let peer = self.session?.peer {
-                            self.lastConnectedPeer = peer
+                    if !isSenderReliable {
+                        guard self.session?.peer != nil,
+                              self.isSecureSessionReady,
+                              self.activeSessionId == message.decodedBinaryChunk?.sessionId else {
+                            self.logger.error("Chunk reçu avant l'identité ou la session sécurisée")
+                            connection.cancel()
+                            return
                         }
                     }
 
@@ -1043,6 +1150,26 @@ final class ConnectionManager {
                         }
                     }
 
+                    // Toute mutation de transfert est bloquée tant que la
+                    // dérivation ECDH/HKDF et l'installation de la clé ne
+                    // sont pas terminées. Ne pas simplement router puis
+                    // espérer que le gestionnaire de transfert la refuse :
+                    // l'annonce elle-même ne doit jamais créer d'état.
+                    if self.requiresSecureSession(for: message.type),
+                       !self.isSecureSessionReady {
+                        self.logger.error("\(message.type.rawValue, privacy: .public) reçu avant la session sécurisée — connexion fermée")
+                        connection.cancel()
+                        return
+                    }
+
+                    // L'identité n'entre dans la session qu'après signature
+                    // vérifiée et anti-rejeu. Un sender non authentifié ne
+                    // peut donc pas remplacer le pair associé à la connexion.
+                    if isSenderReliable {
+                        self.session?.identifyPeer(message.sender)
+                        self.lastConnectedPeer = message.sender
+                    }
+
                     self.session?.touch()
 
                     self.messageRouter.route(
@@ -1066,15 +1193,16 @@ final class ConnectionManager {
     }
     
 
-     func sendAcknowledgement(
+    @discardableResult
+    func sendAcknowledgement(
         on connection: NWConnection
-    ) {
+    ) -> Bool {
         let message = AirBridgeMessage(
-              type: .acknowledgement,
-              sender: localDevice
-          )
+            type: .acknowledgement,
+            sender: localDevice
+        )
 
-          send(message, on: connection)
+        return send(message, on: connection)
     }
 
     /// Envoie une demande de pairage (premier message du handshake).
@@ -1145,18 +1273,53 @@ final class ConnectionManager {
         }
     }
 
+    @discardableResult
     private func send(
         _ message: AirBridgeMessage,
         on connection: NWConnection,
         completion: ((Result<Void, Error>) -> Void)? = nil
-    ) {
-        // Signature des messages de contrôle. Les chunks de fichier
-        // ne sont pas signés un par un (la chaîne est protégée par
-        // un `transferCompleted` signé à la fin du transfert).
+    ) -> Bool {
+        // Toutes les trames doivent appartenir à la session active. Cela
+        // évite qu'une réponse mise en file pour une ancienne connexion
+        // soit émise sur un socket désormais réutilisé.
+        guard session?.connection === connection else {
+            completion?(.failure(ConnectionManagerError.noActiveConnection))
+            return false
+        }
+
+        // La v1 est définitivement désactivée : aucune trame de contrôle
+        // non signée ne doit sortir, même si un appelant fournit
+        // accidentellement une ancienne version.
+        guard message.protocolVersion >= ProtocolCompatibility.currentVersion,
+              ProtocolCompatibility.isSupported(message.protocolVersion) else {
+            completion?(.failure(ConnectionManagerError.authenticationUnavailable))
+            return false
+        }
+
+        // Les contrôles qui peuvent créer ou muter un transfert ne sont
+        // autorisés qu'après installation effective de la clé de session.
+        // Le hello, le pairage et les deux messages ECDH restent les seules
+        // exceptions nécessaires à l'établissement de cette barrière.
+        guard !requiresSecureSession(for: message.type)
+                || isSecureSessionReady else {
+            logger.error("Envoi de \(message.type.rawValue, privacy: .public) refusé : session sécurisée non prête")
+            completion?(.failure(ConnectionManagerError.secureSessionNotReady))
+            return false
+        }
+
         let signedMessage: AirBridgeMessage
-        if message.type != .fileChunk,
-           message.signature == nil,
-           let signature = MessageAuthenticator.sign(message) {
+        if message.type == .fileChunk {
+            signedMessage = message
+        } else {
+            guard message.sender.id == localDevice.id,
+                  message.sender.publicKeyData == localDevice.publicKeyData,
+                  message.signature == nil,
+                  message.sender.publicKeyData != nil,
+                  let signature = MessageAuthenticator.sign(message) else {
+                logger.error("Message de contrôle non signé : envoi refusé")
+                completion?(.failure(ConnectionManagerError.authenticationUnavailable))
+                return false
+            }
             signedMessage = AirBridgeMessage(
                 protocolVersion: message.protocolVersion,
                 messageID: message.messageID,
@@ -1165,8 +1328,6 @@ final class ConnectionManager {
                 payload: message.payload,
                 signature: signature
             )
-        } else {
-            signedMessage = message
         }
 
         do {
@@ -1181,17 +1342,12 @@ final class ConnectionManager {
             connection.send(
                 content: frame,
                 completion: .contentProcessed { error in
-
                     if let error {
                         self.logger.error("Erreur d’envoi : \(error.localizedDescription, privacy: .public)")
                         completion?(.failure(error))
                         return
                     }
 
-                    // Les morceaux ne sont pas journalisés : ils se comptent
-                    // par milliers sur un gros fichier, et `print` formate
-                    // puis écrit de façon synchrone. La progression est déjà
-                    // observable dans l'interface.
                     if signedMessage.type != .fileChunk {
                         self.logger.debug("Message envoyé : \(signedMessage.type.rawValue, privacy: .public)")
                     }
@@ -1202,15 +1358,15 @@ final class ConnectionManager {
                     }
                 }
             )
+            return true
 
         } catch {
             logger.error("Impossible d’encoder \(signedMessage.type.rawValue, privacy: .public) : \(error.localizedDescription, privacy: .public)")
-
             completion?(.failure(error))
+            return false
         }
     }
-    
-    
+
     @discardableResult
     func sendTransferRequest(
         transferID: UUID = UUID(),
@@ -1221,8 +1377,10 @@ final class ConnectionManager {
         batchFolderName: String? = nil,
         relativePath: String? = nil
     ) -> UUID? {
-        guard let connection else {
-            logger.error("Impossible d’envoyer la demande : aucune connexion active")
+        guard isSessionReady,
+              isSecureSessionReady,
+              let connection else {
+            logger.error("Impossible d’envoyer la demande : session sécurisée non prête")
             return nil
         }
 
@@ -1247,7 +1405,10 @@ final class ConnectionManager {
                 payload: payloadData
             )
 
-            send(message, on: connection)
+            guard send(message, on: connection) else {
+                logger.error("Demande de transfert refusée avant émission")
+                return nil
+            }
 
             return requestPayload.transferID
 
@@ -1258,10 +1419,11 @@ final class ConnectionManager {
     }
     
     
+    @discardableResult
     func sendTransferAccepted(
         transferID: UUID,
         on connection: NWConnection
-    ) {
+    ) -> Bool {
         let payload = TransferAcceptedPayload(
             transferID: transferID
         )
@@ -1275,18 +1437,20 @@ final class ConnectionManager {
                 payload: payloadData
             )
 
-            send(message, on: connection)
+            return send(message, on: connection)
 
         } catch {
             logger.error("Impossible d’encoder l’acceptation : \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
     
+    @discardableResult
     func sendTransferRejected(
         transferID: UUID,
         reason: String?,
         on connection: NWConnection
-    ) {
+    ) -> Bool {
         let payload = TransferRejectedPayload(
             transferID: transferID,
             reason: reason
@@ -1301,21 +1465,23 @@ final class ConnectionManager {
                 payload: payloadData
             )
 
-            send(message, on: connection)
+            return send(message, on: connection)
 
         } catch {
             logger.error("Impossible d’encoder le refus : \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
+    @discardableResult
     func sendTransferCompleted(
         transferID: UUID,
         totalBytes: Int64,
         sha256: String
-    ) {
+    ) -> Bool {
         guard let connection else {
             logger.error("Aucune connexion active")
-            return
+            return false
         }
 
         let payload = TransferCompletedPayload(
@@ -1335,17 +1501,20 @@ final class ConnectionManager {
                 payload: payloadData
             )
 
-            send(message, on: connection)
+            return send(message, on: connection)
 
         } catch {
             logger.error("Impossible d’encoder transferCompleted : \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
+
+    @discardableResult
     func sendTransferSucceeded(
         transferID: UUID,
         receivedBytes: Int64,
         on connection: NWConnection
-    ) {
+    ) -> Bool {
         let payload = TransferSucceededPayload(
             transferID: transferID,
             receivedBytes: receivedBytes
@@ -1360,19 +1529,21 @@ final class ConnectionManager {
                 payload: payloadData
             )
 
-            send(message, on: connection)
+            return send(message, on: connection)
 
         } catch {
             logger.error("Impossible d’encoder transferSucceeded : \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
     
     
+    @discardableResult
     func sendTransferFailed(
         transferID: UUID,
         reason: String,
         on connection: NWConnection
-    ) {
+    ) -> Bool {
         let payload = TransferFailedPayload(
             transferID: transferID,
             reason: reason
@@ -1387,16 +1558,18 @@ final class ConnectionManager {
                 payload: payloadData
             )
 
-            send(message, on: connection)
+            return send(message, on: connection)
 
         } catch {
             logger.error("Impossible d’encoder transferFailed : \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
     
     
     
     
+    @discardableResult
     func sendResumeRequest(
         transferID: UUID,
         receivedBytes: Int64,
@@ -1404,14 +1577,16 @@ final class ConnectionManager {
         fileName: String = "",
         chunkSize: Int = 0,
         sha256: String = ""
-    ) {
+    ) -> Bool {
         // Garde stricte : la session doit être confirmée `.ready` par le
         // `stateUpdateHandler`. Une session en préparation ou en attente
         // accepterait l'envoi en file sans jamais le délivrer — sur une
         // connexion qui expire, le resumeRequest partirait dans le vide.
-        guard isSessionReady, let connection else {
-            logger.error("Impossible d’envoyer resumeRequest : session non prête")
-            return
+        guard isSessionReady,
+              isSecureSessionReady,
+              let connection else {
+            logger.error("Impossible d’envoyer resumeRequest : session sécurisée non prête")
+            return false
         }
 
         let protocolVersion = negotiatedProtocolVersion
@@ -1434,12 +1609,14 @@ final class ConnectionManager {
                 sender: localDevice,
                 payload: payloadData
             )
-            send(message, on: connection)
+            return send(message, on: connection)
         } catch {
             logger.error("Impossible d’encoder resumeRequest")
+            return false
         }
     }
 
+    @discardableResult
     func sendResumeAccepted(
         transferID: UUID,
         offset: Int64,
@@ -1448,7 +1625,7 @@ final class ConnectionManager {
         chunkSize: Int,
         fileSize: Int64,
         on connection: NWConnection
-    ) {
+    ) -> Bool {
         let payload = ResumeAcceptedPayload(
             transferID: transferID,
             offset: offset,
@@ -1464,19 +1641,21 @@ final class ConnectionManager {
                 sender: localDevice,
                 payload: payloadData
             )
-            send(message, on: connection)
+            return send(message, on: connection)
         } catch {
             logger.error("Impossible d’encoder resumeAccepted")
+            return false
         }
     }
 
+    @discardableResult
     func sendTransferCancelled(
         transferID: UUID,
         reason: String? = nil
-    ) {
+    ) -> Bool {
         guard let connection else {
             logger.error("Impossible d’envoyer transferCancelled : aucune connexion active")
-            return
+            return false
         }
 
         let payload = TransferCancelledPayload(
@@ -1495,13 +1674,14 @@ final class ConnectionManager {
                 payload: payloadData
             )
 
-            send(
+            return send(
                 message,
                 on: connection
             )
 
         } catch {
             logger.error("Impossible d’encoder transferCancelled : \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
     
