@@ -23,14 +23,15 @@ final class MessageAuthenticatorTests: XCTestCase {
 
     // MARK: - Politique d'authentification
 
-    /// Vérifie qu'un message sans signature est accepté en mode permissif
-    /// `optionalLegacy` (compatibilité v1).
+    /// Vérifie qu'un message sans signature est REJETÉ, y compris quand
+    /// l'appelant passe `.optionalLegacy`.
     ///
-    /// Note politique : la Phase C a remplacé le comportement permissif
-    /// par défaut par une politique stricte. Un message non signé n'est
-    /// désormais accepté que si l'appelant passe explicitement
-    /// `.optionalLegacy`. Ce test reflète la nouvelle API.
-    func testUnsignedMessageIsAcceptedInLegacyMode() {
+    /// Note politique : `.optionalLegacy` n'est conservé que pour la
+    /// compatibilité source d'anciens appelants. La v1 est désactivée
+    /// (`ProtocolCompatibility.minimumSupportedVersion == 2`) et aucun
+    /// mode permissif ne subsiste : un contrôle non signé ne peut pas
+    /// muter l'état d'une session.
+    func testUnsignedMessageIsRejectedEvenInLegacyMode() {
         let message = AirBridgeMessage(
             type: .hello,
             sender: localDevice,
@@ -39,14 +40,14 @@ final class MessageAuthenticatorTests: XCTestCase {
         )
 
         let anyKey = P256.Signing.PrivateKey().publicKey.x963Representation
-        XCTAssertTrue(
+        XCTAssertFalse(
             MessageAuthenticator.verify(
                 message,
                 requirement: .optionalLegacy,
                 storePublicKey: nil,
                 advertisedPublicKey: anyKey
             ),
-            "Un message sans signature doit être accepté en mode .optionalLegacy"
+            "Un message sans signature doit être rejeté, même en mode .optionalLegacy"
         )
     }
 

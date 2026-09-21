@@ -30,6 +30,23 @@ final class BonjourService {
     private var listener: NWListener?
     private var browser: NWBrowser?
 
+    // MARK: - État Bonjour observable (diagnostic)
+
+    /// Le service `_airbridge._tcp` est publié et le port d'écoute est
+    /// ouvert : l'appareil peut **recevoir** des connexions.
+    private(set) var isAdvertisingReady = false
+
+    /// La recherche Bonjour est active : l'appareil peut **découvrir** les
+    /// pairs à proximité.
+    private(set) var isBrowsingReady = false
+
+    /// L'accès au réseau local a été refusé par le système (iOS 14+ /
+    /// macOS 15+). Cause la plus fréquente d'un radar vide et d'un
+    /// transfert qui ne démarre jamais : sans cette autorisation, ni la
+    /// découverte ni la publication ne fonctionnent, et aucun pair ne peut
+    /// répondre à une annonce.
+    private(set) var isLocalNetworkAuthorizationDenied = false
+
     let localDevice: Device
 
     private(set) var discoveredDevices: [DiscoveredDevice]  = []
@@ -189,6 +206,7 @@ final class BonjourService {
 
                     Task { @MainActor [weak self] in
                         self?.advertisingIssue = nil
+                        self?.isAdvertisingReady = true
                     }
 
                 case .failed(let error):
@@ -199,8 +217,13 @@ final class BonjourService {
                         stage: "La publication d'AirBridge sur le réseau local a échoué",
                         error: error
                     )
+                    let authorizationDenied = Self.isAuthorizationError(error)
                     Task { @MainActor [weak self] in
                         self?.advertisingIssue = issue
+                        self?.isAdvertisingReady = false
+                        if authorizationDenied {
+                            self?.isLocalNetworkAuthorizationDenied = true
+                        }
                     }
 
                 case .cancelled:
@@ -209,6 +232,7 @@ final class BonjourService {
 
                     Task { @MainActor [weak self] in
                         self?.advertisingIssue = nil
+                        self?.isAdvertisingReady = false
                     }
 
                 default:
@@ -269,6 +293,8 @@ final class BonjourService {
 
                 Task { @MainActor [weak self] in
                     self?.browsingIssue = nil
+                    self?.isBrowsingReady = true
+                    self?.isLocalNetworkAuthorizationDenied = false
                 }
 
             case .failed(let error):
@@ -278,8 +304,13 @@ final class BonjourService {
                     stage: "La recherche d'appareils a échoué",
                     error: error
                 )
+                let authorizationDenied = Self.isAuthorizationError(error)
                 Task { @MainActor [weak self] in
                     self?.browsingIssue = issue
+                    self?.isBrowsingReady = false
+                    if authorizationDenied {
+                        self?.isLocalNetworkAuthorizationDenied = true
+                    }
                 }
 
             case .cancelled:
@@ -287,6 +318,7 @@ final class BonjourService {
 
                 Task { @MainActor [weak self] in
                     self?.browsingIssue = nil
+                    self?.isBrowsingReady = false
                 }
 
             case .setup:
@@ -306,6 +338,8 @@ final class BonjourService {
                     )
                     Task { @MainActor [weak self] in
                         self?.browsingIssue = issue
+                        self?.isBrowsingReady = false
+                        self?.isLocalNetworkAuthorizationDenied = true
                     }
                 }
 
@@ -388,6 +422,7 @@ final class BonjourService {
 
         listener?.cancel()
         listener = nil
+        isAdvertisingReady = false
 
         logger.info("Publication Bonjour arrêtée")
 
@@ -402,6 +437,7 @@ final class BonjourService {
 
         browser?.cancel()
         browser = nil
+        isBrowsingReady = false
 
         discoveredDevices.removeAll()
 

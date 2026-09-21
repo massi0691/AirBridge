@@ -25,6 +25,11 @@ struct SettingsView: View {
     let notificationManager: NotificationManager
     let pairingStore: PairingStore
 
+    /// Cœur de l'application, pour la section « Diagnostic du partage ».
+    /// Optionnel : les écrans qui n'ont pas le Core sous la main affichent
+    /// simplement les réglages historiques.
+    var core: AirBridgeCore? = nil
+
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Massinissa.AirBridge",
         category: "ui.settings"
@@ -98,6 +103,10 @@ struct SettingsView: View {
                     }
                 }
                 #endif
+            }
+
+            if let core {
+                DiagnosticsView(core: core)
             }
 
             Section("Appareils appairés") {

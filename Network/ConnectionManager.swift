@@ -57,6 +57,15 @@ final class ConnectionManager {
     
     private(set) var stateDescription = "Déconnecté"
 
+    /// Dernier contrôle écarté à la réception, avec sa cause.
+    ///
+    /// Un message de contrôle rejeté (signature non vérifiable, pair jamais
+    /// appairé, rejeu) n'était visible que dans les traces système : côté
+    /// émetteur, le transfert restait « En attente » sans aucune explication
+    /// à l'écran. Cet état permet à l'interface de diagnostic de nommer la
+    /// cause exacte (ex. « transferAccepted écarté : pair non appairé »).
+    private(set) var lastReceptionRejection: ReceptionRejection?
+
     /// Vrai uniquement quand la session courante a été confirmée `.ready`
     /// par le `stateUpdateHandler` — jamais entre `connect()` et ce
     /// callback, où la session existe déjà mais ne peut rien transporter.
@@ -211,12 +220,14 @@ final class ConnectionManager {
         //    du sender. Un pair sans clé ne peut pas bénéficier d'un
         //    fallback implicite.
         guard message.sender.publicKeyData?.isEmpty == false else {
+            recordRejection(.missingPublicKey, for: message)
             logger.error("Message v2 sans clé publique long terme")
             return false
         }
 
         let advertisedPublicKey = extractAdvertisedPublicKey(from: message)
         guard payloadIdentityMatchesSender(message) else {
+            recordRejection(.identityMismatch, for: message)
             logger.error("Identité du payload différente de celle du sender")
             return false
         }
@@ -250,11 +261,37 @@ final class ConnectionManager {
             advertisedPublicKey: advertisedPublicKey
         )
         guard signatureOK else {
+            // La cause exacte est conservée pour l'écran de diagnostic :
+            // un `transferAccepted` écarté ici laisse sinon l'émetteur
+            // « En attente » sans aucune explication exploitable.
+            let rejectionKind: ReceptionRejection.Kind
+            if pairingInfo == nil {
+                rejectionKind = .peerNotPaired
+            } else if !peerPublicKeyMatches {
+                rejectionKind = .keyMismatch
+            } else {
+                rejectionKind = .signatureInvalid
+            }
+
+            recordRejection(rejectionKind, for: message)
             logger.error("Signature invalide pour \(message.type.rawValue, privacy: .public) de \(message.sender.name, privacy: .public) (policy=\(String(describing: requirement), privacy: .public)) — message ignoré")
             return false
         }
 
         return true
+    }
+
+    /// Mémorise le dernier contrôle écarté (cause + type + pair).
+    /// Purement diagnostique : ne modifie aucune décision de sécurité.
+    private func recordRejection(
+        _ kind: ReceptionRejection.Kind,
+        for message: AirBridgeMessage
+    ) {
+        lastReceptionRejection = ReceptionRejection(
+            kind: kind,
+            messageType: message.type.rawValue,
+            peerName: message.sender.name
+        )
     }
 
     /// Vérifie les champs d'identité redondants des payloads de pairage.
@@ -1144,6 +1181,7 @@ final class ConnectionManager {
                         // messageIDs invalides.
                         let isReplay = await self.isFreshMessage(message)
                         guard isReplay else {
+                            self.recordRejection(.replay, for: message)
                             self.logger.warning("Replay détecté pour \(message.type.rawValue, privacy: .public) de \(message.sender.name, privacy: .public) (messageID=\(message.messageID, privacy: .public)) — message ignoré")
                             self.receiveHeader(on: connection)
                             return
@@ -1157,6 +1195,7 @@ final class ConnectionManager {
                     // l'annonce elle-même ne doit jamais créer d'état.
                     if self.requiresSecureSession(for: message.type),
                        !self.isSecureSessionReady {
+                        self.recordRejection(.secureSessionNotReady, for: message)
                         self.logger.error("\(message.type.rawValue, privacy: .public) reçu avant la session sécurisée — connexion fermée")
                         connection.cancel()
                         return
@@ -1419,11 +1458,52 @@ final class ConnectionManager {
     }
     
     
+    /// Résout la connexion sur laquelle un contrôle de transfert doit
+    /// réellement partir.
+    ///
+    /// Un contrôle est souvent préparé avec la connexion sur laquelle la
+    /// demande est arrivée (`PendingTransferRequest.connection`). Entre
+    /// l'arrivée de la demande et le geste de l'utilisateur, cette
+    /// connexion peut être devenue périmée (session fermée puis rétablie,
+    /// connexion croisée remplacée). Or `send(_:on:)` exige
+    /// `session?.connection === connection` : l'émission échouait donc en
+    /// silence et **l'émetteur restait « En attente » alors que le
+    /// récepteur avait accepté**. On retombe ici sur la connexion de la
+    /// session vivante, en journalisant le repli.
+    ///
+    /// - Returns: la connexion de la session active, ou `nil` si aucune
+    ///   session n'est ouverte (l'appelant doit alors traiter l'échec).
+    private func resolveControlConnection(
+        preferred: NWConnection?
+    ) -> NWConnection? {
+        guard let activeConnection = connection else {
+            logger.error("Contrôle de transfert non envoyé : aucune session active")
+            return nil
+        }
+
+        guard let preferred else {
+            return activeConnection
+        }
+
+        if preferred === activeConnection {
+            return activeConnection
+        }
+
+        logger.warning("Connexion de contrôle périmée : repli sur la session active")
+        return activeConnection
+    }
+
     @discardableResult
     func sendTransferAccepted(
         transferID: UUID,
         on connection: NWConnection
     ) -> Bool {
+        guard let controlConnection = resolveControlConnection(
+            preferred: connection
+        ) else {
+            return false
+        }
+
         let payload = TransferAcceptedPayload(
             transferID: transferID
         )
@@ -1437,20 +1517,52 @@ final class ConnectionManager {
                 payload: payloadData
             )
 
-            return send(message, on: connection)
+            let sent = send(message, on: controlConnection)
+
+            if !sent {
+                logger.error("Acceptation non transmise à l’émetteur : \(transferID, privacy: .public)")
+            }
+
+            return sent
 
         } catch {
             logger.error("Impossible d’encoder l’acceptation : \(error.localizedDescription, privacy: .public)")
             return false
         }
     }
-    
+
+    /// Variante sans connexion explicite : part sur la session vivante.
+    /// Utilisée quand l'acceptation n'est pas liée à une demande reçue
+    /// (relance, reprise) — le repli sur la session active est alors le
+    /// seul canal possible.
+    @discardableResult
+    func sendTransferAccepted(
+        transferID: UUID
+    ) -> Bool {
+        guard let controlConnection = resolveControlConnection(
+            preferred: nil
+        ) else {
+            return false
+        }
+
+        return sendTransferAccepted(
+            transferID: transferID,
+            on: controlConnection
+        )
+    }
+
     @discardableResult
     func sendTransferRejected(
         transferID: UUID,
         reason: String?,
         on connection: NWConnection
     ) -> Bool {
+        guard let controlConnection = resolveControlConnection(
+            preferred: connection
+        ) else {
+            return false
+        }
+
         let payload = TransferRejectedPayload(
             transferID: transferID,
             reason: reason
@@ -1465,12 +1577,31 @@ final class ConnectionManager {
                 payload: payloadData
             )
 
-            return send(message, on: connection)
+            return send(message, on: controlConnection)
 
         } catch {
             logger.error("Impossible d’encoder le refus : \(error.localizedDescription, privacy: .public)")
             return false
         }
+    }
+
+    /// Variante sans connexion explicite de `sendTransferRejected`.
+    @discardableResult
+    func sendTransferRejected(
+        transferID: UUID,
+        reason: String?
+    ) -> Bool {
+        guard let controlConnection = resolveControlConnection(
+            preferred: nil
+        ) else {
+            return false
+        }
+
+        return sendTransferRejected(
+            transferID: transferID,
+            reason: reason,
+            on: controlConnection
+        )
     }
 
     @discardableResult

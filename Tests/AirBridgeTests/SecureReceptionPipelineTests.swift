@@ -48,8 +48,9 @@ final class SecureReceptionPipelineTests: XCTestCase {
         XCTAssertEqual(requirement, .required)
     }
 
-    /// v1 (toute combinaison) → `.optionalLegacy` (compatibilité ascendante).
-    func testPolicyIsOptionalLegacyForV1() {
+    /// v1 (toute combinaison) → `.required` : la v1 est désactivée, aucun
+    /// mode permissif ne subsiste (anti-downgrade).
+    func testPolicyIsStrictForV1() {
         for type in AirBridgeMessageType.allCases {
             for trustState in TrustState.allCases {
                 for keyMatches in [true, false] {
@@ -61,8 +62,8 @@ final class SecureReceptionPipelineTests: XCTestCase {
                     )
                     XCTAssertEqual(
                         requirement,
-                        .optionalLegacy,
-                        "En v1, \(type) avec pair=\(trustState) cléMatch=\(keyMatches) doit rester permissif"
+                        .required,
+                        "En v1, \(type) avec pair=\(trustState) cléMatch=\(keyMatches) doit rester strict"
                     )
                 }
             }
@@ -229,8 +230,13 @@ final class SecureReceptionPipelineTests: XCTestCase {
 
     // MARK: - MessageAuthenticator.verify — mode .optionalLegacy
 
-    /// `.optionalLegacy` + signature absente → `true` (mode permissif v1).
-    func testVerifyAcceptsUnsignedWhenOptionalLegacy() {
+    /// `.optionalLegacy` + signature absente → `false`.
+    ///
+    /// La valeur n'est conservée que pour la compatibilité **source** :
+    /// elle n'est plus permissive. Un contrôle non signé est rejeté quel
+    /// que soit le mode, sinon un pair v1 (ou un attaquant annonçant v1)
+    /// pourrait faire muter l'état d'une session v2 sans preuve d'identité.
+    func testVerifyRejectsUnsignedEvenWhenOptionalLegacy() {
         let message = AirBridgeMessage(
             type: .hello,
             sender: localDevice,
@@ -238,14 +244,14 @@ final class SecureReceptionPipelineTests: XCTestCase {
             signature: nil
         )
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             MessageAuthenticator.verify(
                 message,
                 requirement: .optionalLegacy,
                 storePublicKey: nil,
                 advertisedPublicKey: peerPrivateKey.publicKey.x963Representation
             ),
-            "Un message sans signature doit être accepté en mode .optionalLegacy"
+            "Un message sans signature doit être rejeté, même en mode .optionalLegacy"
         )
     }
 

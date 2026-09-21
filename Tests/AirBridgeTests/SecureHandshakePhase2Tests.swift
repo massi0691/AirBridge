@@ -403,16 +403,18 @@ final class SecureHandshakePhase2Tests: XCTestCase {
     // MARK: - 5. Compatibilité v1/v2 (cross-protocol) — MAJEUR-4
 
     /// Un pair qui parle v1 envoie un message de contrôle **non signé**
-    /// alors que l'application locale est configurée en v2 (pair de
-    /// confiance, clé publique qui matche). Le pipeline de réception
-    /// doit l'accepter : la `AuthenticationPolicy` retombe sur
-    /// `.optionalLegacy` dès que `protocolVersion < 2`, ce qui rend le
-    /// mode permissif v1 inconditionnel.
+    /// alors que l'application locale est en v2. Le message doit être
+    /// refusé à trois niveaux :
+    ///   1. `ProtocolCompatibility.isSupported(1) == false` — la trame est
+    ///      écartée avant tout routage (et la connexion fermée) ;
+    ///   2. `AuthenticationPolicy` renvoie `.required` pour toute version
+    ///      antérieure à v2 — aucun mode permissif ne subsiste ;
+    ///   3. `MessageAuthenticator.verify` rejette un contrôle non signé.
     ///
-    /// C'est la garantie de compatibilité ascendante : tant qu'un pair
-    /// n'a pas migré vers v2, ses messages ne doivent pas être rejetés
-    /// simplement parce que l'application locale a évolué.
-    func testV1V2CrossProtocolCompatibility() {
+    /// C'est la garantie anti-downgrade : conserver un fallback v1
+    /// permettrait à un attaquant de faire accepter des mutations non
+    /// authentifiées en annonçant simplement une version ancienne.
+    func testV1IsRefusedWithoutDowngrade() {
         // Un message `hello` non signé, annoncé en v1.
         let v1Hello = AirBridgeMessage(
             protocolVersion: 1,
@@ -427,9 +429,15 @@ final class SecureHandshakePhase2Tests: XCTestCase {
             signature: nil
         )
 
-        // 1. La politique doit explicitement retomber sur `.optionalLegacy`
-        //    pour v1, même quand tous les autres indicateurs (pair
-        //    trusted, clé qui matche) suggèrent `.required`.
+        // 0. La version elle-même est hors de la plage acceptée.
+        XCTAssertFalse(
+            ProtocolCompatibility.isSupported(v1Hello.protocolVersion),
+            "Une trame v1 ne doit pas être décodable par une application v2"
+        )
+
+        // 1. La politique reste stricte pour v1, même quand tous les
+        //    autres indicateurs (pair trusted, clé qui matche)
+        //    suggéreraient un traitement nominal.
         let requirement = AuthenticationPolicy.authenticationRequirement(
             for: v1Hello.type,
             protocolVersion: v1Hello.protocolVersion,
@@ -437,21 +445,20 @@ final class SecureHandshakePhase2Tests: XCTestCase {
             peerPublicKeyMatches: true
         )
         XCTAssertEqual(
-            requirement, .optionalLegacy,
-            "Un message v1 doit toujours bénéficier du mode permissif, même si les conditions v2 exigeraient .required"
+            requirement, .required,
+            "Un message v1 ne doit bénéficier d'aucun mode permissif"
         )
 
-        // 2. La vérification par `MessageAuthenticator` accepte le
-        //    message non signé via le chemin `.optionalLegacy`.
+        // 2. `MessageAuthenticator` rejette le contrôle non signé.
         let accepted = MessageAuthenticator.verify(
             v1Hello,
             requirement: requirement,
             storePublicKey: nil,
             advertisedPublicKey: nil
         )
-        XCTAssertTrue(
+        XCTAssertFalse(
             accepted,
-            "Un message v1 non signé doit être accepté en mode .optionalLegacy (compatibilité ascendante)"
+            "Un message v1 non signé doit être rejeté (anti-downgrade)"
         )
     }
 

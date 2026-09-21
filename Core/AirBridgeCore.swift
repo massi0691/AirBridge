@@ -12,6 +12,36 @@ import CryptoKit
 import OSLog
 internal import UniformTypeIdentifiers
 
+/// Issue d'une tentative de démarrage d'un envoi approuvé par le pair.
+///
+/// Le démarrage peut échouer **sans** que le transfert soit condamné
+/// (session sécurisée pas encore prête, entrée pas encore active dans la
+/// file FIFO) : l'appelant doit alors conserver un délai de sécurité.
+/// Distinguer explicitement ces issues supprime le blocage historique où
+/// un `transferAccepted` annulait le délai d'approbation avant un
+/// démarrage qui n'avait finalement jamais lieu — le transfert restait
+/// « En attente » pour toujours, sans échec, sans reprise et sans log
+/// exploitable.
+///
+/// `nonisolated` : valeur pure, comparable depuis les tests comme depuis
+/// le cœur `@MainActor` (isolation par défaut du projet).
+nonisolated enum OutgoingStartOutcome: Equatable {
+
+    /// Le pipeline d'envoi a démarré.
+    case started
+
+    /// Le pipeline tournait déjà : rien à faire.
+    case alreadyRunning
+
+    /// Le transfert est terminé en échec (source illisible) : il n'est
+    /// plus « En attente », aucun filet n'est nécessaire.
+    case finishedInError
+
+    /// Démarrage impossible pour l'instant ; un délai de sécurité doit
+    /// rester armé.
+    case deferred(reason: String)
+}
+
 @MainActor
 @Observable
 final class AirBridgeCore {
@@ -77,6 +107,24 @@ final class AirBridgeCore {
     /// session puisse en rouvrir une.
     private var isResumeCampaignActive = false
 
+    // MARK: - Délais de sécurité (jamais d'attente infinie)
+
+    /// Délai accordé à un envoi **accepté par le pair** mais dont le
+    /// démarrage a été reporté (session sécurisée pas prête, pair changé).
+    /// Au-delà, une dernière tentative est faite puis le transfert échoue
+    /// avec un motif explicite et le pair est prévenu.
+    ///
+    /// Court volontairement : à ce stade le destinataire a déjà dit oui,
+    /// l'utilisateur attend un démarrage immédiat, pas les 300 s du délai
+    /// d'approbation.
+    private static let acceptedStartGracePeriod: Duration = .seconds(20)
+
+    /// Délai accordé à l'annonce d'un envoi (`transferRequest`) quand elle
+    /// est reportée (session sécurisée non prête, pairage non enregistré).
+    /// Sans lui, un transfert pouvait rester « Préparation » indéfiniment
+    /// sans jamais échouer ni prévenir l'utilisateur.
+    private static let announcementGracePeriod: Duration = .seconds(30)
+
 
     init(
         bonjourService: BonjourService,
@@ -113,23 +161,82 @@ final class AirBridgeCore {
             return
         }
 
-        beginOutgoingTransfer(entry)
+        // L'entrée a pu être acceptée par le pair pendant qu'elle attendait
+        // son tour dans la file FIFO. Si son démarrage est maintenant
+        // reporté (session sécurisée retombée, pair changé), un délai doit
+        // être armé ici aussi : sans lui, plus aucun filet ne couvre cette
+        // entrée et elle reste « Accepté » sans jamais démarrer.
+        switch beginOutgoingTransfer(entry) {
+        case .started, .alreadyRunning, .finishedInError:
+            break
+
+        case .deferred(let reason):
+            logger.warning(
+                "Activation d’un envoi déjà accepté mais démarrage reporté : \(reason, privacy: .public)"
+            )
+            armAcceptedStartTimeout(
+                transferID: entry.id,
+                reason: reason
+            )
+        }
     }
 
+    /// Envoie l'annonce de transfert (`transferRequest`) d'une entrée, si
+    /// les conditions de session et de pairage sont réunies.
+    ///
+    /// - Parameter allowDeferralTimeout: arme un délai borné quand
+    ///   l'annonce est reportée. À `false` pour la relance effectuée depuis
+    ///   ce même délai (sinon le report se réarmerait indéfiniment et le
+    ///   transfert n'échouerait jamais).
     private func sendApprovalRequestIfNeeded(
-        for entry: OutgoingTransferQueue.Entry
+        for entry: OutgoingTransferQueue.Entry,
+        allowDeferralTimeout: Bool = true
     ) {
         // La queue peut être activée dès la connexion TCP, avant l'ECDH.
         // Attendre ici plutôt que transformer cette attente normale en
         // échec terminal ; `installSessionKeyAndMarkReady` réessaiera
-        // l'entrée active après le handshake.
+        // l'entrée active après le handshake. L'attente reste bornée : sans
+        // délai, un handshake qui n'aboutit pas laissait le transfert
+        // « Préparation » pour toujours.
         guard connectionManager.isSecureSessionReady,
               connectionManager.connectedDevice?.id == entry.peer.id else {
             logger.info("Demande de transfert reportée : session sécurisée non prête")
+            if allowDeferralTimeout {
+                armAnnouncementTimeout(
+                    transferID: entry.id,
+                    reason: "session sécurisée non prête"
+                )
+            }
             return
         }
 
         guard !approvalRequestsSent.contains(entry.id) else {
+            return
+        }
+
+        // Barrière de pairage.
+        //
+        // `transferRequest` est le seul contrôle sensible qu'un pair encore
+        // inconnu peut recevoir (`AuthenticationPolicy` l'autorise avant
+        // pairage), mais la réponse du destinataire — `transferAccepted` —
+        // exige, elle, une clé déjà enregistrée dans le `PairingStore`.
+        // Annoncer un transfert avant la fin du pairage produisait donc
+        // exactement le blocage observé : le destinataire accepte, son
+        // acceptation est écartée à la réception (signature invérifiable
+        // faute de clé persistée), et l'émetteur reste « En attente ».
+        //
+        // On attend donc que le pair soit enregistré —
+        // `retryDeferredApprovalRequests()` rejoue l'annonce dès que le
+        // pairage aboutit — et on relance le pairage si rien n'est en vol.
+        guard pairingStore.pairing(for: entry.peer.id) != nil else {
+            logger.info("Demande de transfert reportée : pairage non enregistré pour \(entry.peer.name, privacy: .public)")
+            restartPairingIfNeeded(for: entry.peer)
+            if allowDeferralTimeout {
+                armAnnouncementTimeout(
+                    transferID: entry.id,
+                    reason: "pairage non enregistré"
+                )
+            }
             return
         }
 
@@ -176,15 +283,138 @@ final class AirBridgeCore {
         }
     }
 
+    /// Arme le délai borné d'une annonce reportée (session sécurisée non
+    /// prête, pairage non enregistré).
+    ///
+    /// À l'échéance, une dernière tentative d'annonce est faite sans
+    /// réarmer de délai ; si elle n'aboutit toujours pas, le transfert
+    /// échoue avec un motif explicite plutôt que de rester « Préparation »
+    /// indéfiniment.
+    private func armAnnouncementTimeout(
+        transferID: UUID,
+        reason: String
+    ) {
+        guard outgoingTransferQueue.contains(transferID) else {
+            return
+        }
+
+        transferTimeoutManager.start(
+            transferID: transferID,
+            kind: .approval,
+            duration: Self.announcementGracePeriod
+        ) { [weak self] in
+            guard let self else {
+                return
+            }
+
+            if let entry = self.outgoingTransferQueue.allEntries.first(where: {
+                $0.id == transferID
+            }) {
+                self.sendApprovalRequestIfNeeded(
+                    for: entry,
+                    allowDeferralTimeout: false
+                )
+
+                if self.approvalRequestsSent.contains(transferID) {
+                    self.logger.info("Annonce finalement transmise après relance : \(transferID, privacy: .public)")
+                    return
+                }
+            }
+
+            self.logger.error("Annonce de transfert impossible (\(reason, privacy: .public)) : échec du transfert \(transferID, privacy: .public)")
+
+            self.failOutgoingTransfer(
+                transferID: transferID,
+                reason: "Transfert impossible : \(reason)",
+                notifyPeer: false
+            )
+        }
+    }
+
+    /// Relance le pairage quand aucune demande n'est déjà en vol.
+    ///
+    /// C'est la seule sortie d'une annonce bloquée sur un pair jamais
+    /// enregistré : sans elle, l'émetteur attendait une clé que personne ne
+    /// venait lui donner.
+    private func restartPairingIfNeeded(
+        for peer: Device
+    ) {
+        guard pendingPairingChallenges[peer.id] == nil else {
+            return
+        }
+
+        guard pairingStore.trustState(for: peer.id) != .blocked else {
+            logger.warning("Pairage non relancé : \(peer.name, privacy: .public) est bloqué")
+            return
+        }
+
+        guard let connection = connectionManager.session?.connection else {
+            logger.info("Pairage non relancé : aucune session active")
+            return
+        }
+
+        logger.info("Relance du pairage avec \(peer.name, privacy: .public)")
+        initiatePairing(with: peer, on: connection)
+    }
+
+    /// Rejoue les annonces reportées de toutes les entrées de la file.
+    ///
+    /// Appelé quand un verrou saute (session sécurisée prête, pairage
+    /// enregistré) : sans ce rappel, seules l'entrée active était retentée
+    /// et les fichiers d'un lot pouvaient rester « Préparation » alors que
+    /// la voie était libre.
+    private func retryDeferredApprovalRequests() {
+        let pendingEntries = outgoingTransferQueue.allEntries.filter {
+            !approvalRequestsSent.contains($0.id)
+        }
+
+        guard !pendingEntries.isEmpty else {
+            return
+        }
+
+        logger.info("Relance de \(pendingEntries.count) annonce(s) reportée(s)")
+
+        for entry in pendingEntries {
+            sendApprovalRequestIfNeeded(for: entry)
+        }
+    }
+
+    /// Démarre un envoi approuvé par le pair.
+    ///
+    /// - Returns: l'issue de la tentative. `.deferred` signifie « pas
+    ///   encore possible » : l'appelant DOIT conserver un délai de
+    ///   sécurité, sinon le transfert reste « En attente » sans aucune
+    ///   issue (ni échec, ni reprise) — c'était le blocage historique de
+    ///   ce chemin, toutes les gardes échouant en silence.
+    /// Le résultat n'est volontairement pas `@discardableResult` : un
+    /// appelant qui l'ignore réintroduit le blocage historique (démarrage
+    /// reporté sans délai, donc attente infinie).
     private func beginOutgoingTransfer(
         _ entry: OutgoingTransferQueue.Entry
-    ) {
-        guard connectionManager.isSecureSessionReady,
-              connectionManager.connectedDevice?.id == entry.peer.id,
-              outgoingTransferQueue.isActive(entry.id),
-              approvedOutgoingTransfers.contains(entry.id),
-              startedOutgoingTransfers.insert(entry.id).inserted else {
-            return
+    ) -> OutgoingStartOutcome {
+        guard connectionManager.isSecureSessionReady else {
+            logger.info("Démarrage reporté : session sécurisée non prête — \(entry.fileName, privacy: .public)")
+            return .deferred(reason: "session sécurisée non prête")
+        }
+
+        guard connectionManager.connectedDevice?.id == entry.peer.id else {
+            logger.info("Démarrage reporté : le pair connecté n’est plus \(entry.peer.name, privacy: .public)")
+            return .deferred(reason: "l’appareil connecté n’est plus le destinataire")
+        }
+
+        guard outgoingTransferQueue.isActive(entry.id) else {
+            logger.info("Démarrage différé : entrée non active dans la file — \(entry.fileName, privacy: .public)")
+            return .deferred(reason: "entrée en attente dans la file d’envoi")
+        }
+
+        guard approvedOutgoingTransfers.contains(entry.id) else {
+            logger.info("Démarrage différé : acceptation du pair non enregistrée — \(entry.fileName, privacy: .public)")
+            return .deferred(reason: "acceptation du destinataire non enregistrée")
+        }
+
+        guard startedOutgoingTransfers.insert(entry.id).inserted else {
+            logger.info("Démarrage ignoré : le pipeline tourne déjà — \(entry.fileName, privacy: .public)")
+            return .alreadyRunning
         }
 
         do {
@@ -205,6 +435,8 @@ final class AirBridgeCore {
                 transferID: entry.id,
                 fileURL: fileURL
             )
+
+            return .started
         } catch {
             startedOutgoingTransfers.remove(entry.id)
             transferManager.markFailed(
@@ -214,7 +446,88 @@ final class AirBridgeCore {
             finishOutgoingTransfer(
                 transferID: entry.id
             )
+
+            return .finishedInError
         }
+    }
+
+    /// Filet de sécurité d'un envoi accepté par le pair mais dont le
+    /// démarrage a été reporté.
+    ///
+    /// À l'échéance, une dernière tentative de démarrage est faite (la
+    /// session sécurisée a pu revenir entre-temps). Si elle échoue encore,
+    /// le transfert passe en échec avec un motif explicite **et le pair est
+    /// prévenu** : les deux appareils convergent au lieu de rester chacun
+    /// sur un état contradictoire (« En attente » ici, « Accepté » là-bas).
+    private func armAcceptedStartTimeout(
+        transferID: UUID,
+        reason: String
+    ) {
+        guard outgoingTransferQueue.contains(transferID) else {
+            return
+        }
+
+        transferTimeoutManager.start(
+            transferID: transferID,
+            kind: .approval,
+            duration: Self.acceptedStartGracePeriod
+        ) { [weak self] in
+            guard let self else {
+                return
+            }
+
+            if let entry = self.outgoingTransferQueue.allEntries.first(where: {
+                $0.id == transferID
+            }) {
+                switch self.beginOutgoingTransfer(entry) {
+                case .started, .alreadyRunning, .finishedInError:
+                    self.transferTimeoutManager.cancel(
+                        transferID: transferID
+                    )
+                    self.logger.info("Démarrage réussi après relance : \(transferID, privacy: .public)")
+                    return
+
+                case .deferred(let retryReason):
+                    self.logger.error("Démarrage toujours impossible : \(retryReason, privacy: .public)")
+                }
+            }
+
+            self.failOutgoingTransfer(
+                transferID: transferID,
+                reason: "Transfert accepté par le destinataire mais démarrage impossible (\(reason))",
+                notifyPeer: true
+            )
+        }
+    }
+
+    /// Sort un envoi approuvé dont l'entrée a disparu de la file (coupure,
+    /// annulation locale, nettoyage de session) : il ne peut plus démarrer,
+    /// donc il ne doit plus apparaître comme « En attente ».
+    ///
+    /// `.interrupted` (et non `.failed`) : rien n'a été envoyé, la source
+    /// est toujours là, et la reprise automatique le proposera au retour du
+    /// pair.
+    private func recoverOrphanedApprovedTransfer(
+        transferID: UUID
+    ) {
+        guard !transferManager.isTerminal(transferID: transferID) else {
+            return
+        }
+
+        let transferredBytes = transferManager.transfers
+            .first { $0.id == transferID }?
+            .transferredBytes ?? 0
+
+        transferManager.markInterrupted(
+            transferID: transferID,
+            transferredBytes: transferredBytes,
+            protocolVersion: ProtocolCompatibility.currentVersion
+        )
+
+        startedOutgoingTransfers.remove(transferID)
+        approvalRequestsSent.remove(transferID)
+
+        logger.warning("Acceptation reçue pour un envoi absent de la file — marqué interrompu (reprisable) : \(transferID, privacy: .public)")
     }
 
     private func failOutgoingTransfer(
@@ -233,8 +546,12 @@ final class AirBridgeCore {
             )
         }
 
+        // Le motif est conservé sur le transfert (`errorMessage`) et pas
+        // seulement envoyé au pair : un échec de démarrage doit rester
+        // explicable après coup, y compris dans les traces et l'historique.
         transferManager.markFailed(
-            transferID: transferID
+            transferID: transferID,
+            reason: reason
         )
 
         finishOutgoingTransfer(
@@ -265,6 +582,20 @@ final class AirBridgeCore {
             // handler de déconnexion a déjà interrompu le transfert : on ne
             // fait qu'un nettoyage terminal classique, sans notifier un pair
             // qui n'est plus joignable.
+            //
+            // Le chemin diffère selon la direction : côté réception,
+            // `interruptOutgoingTransfer` retournait immédiatement (l'entrée
+            // n'est pas dans la file sortante), donc un récepteur dont
+            // l'émetteur se taisait restait figé « En cours » sans issue.
+            let isIncoming = self.transferManager.transfers
+                .first { $0.id == transferID }?
+                .direction == .incoming
+
+            if isIncoming {
+                self.interruptStalledIncomingTransfer(transferID: transferID)
+                return
+            }
+
             guard self.connectionManager.session != nil else {
                 // Liaison déjà perdue mais session pas encore fermée :
                 // même politique que la coupure réseau, jamais `.failed`.
@@ -275,6 +606,40 @@ final class AirBridgeCore {
 
             self.interruptOutgoingTransfer(transferID: transferID)
         }
+    }
+
+    /// Fait passer une réception silencieuse à `.interrupted`.
+    ///
+    /// Le writer est fermé en conservant le `.partial`, et la métadonnée de
+    /// reprise est persistée : la reprise (manuelle ou automatique au retour
+    /// du pair) continue au lieu de repartir de zéro. Sans ce chemin, le
+    /// délai d'activité armé à chaque morceau reçu n'avait aucun effet côté
+    /// réception (`interruptOutgoingTransfer` retourne immédiatement quand
+    /// l'entrée n'est pas dans la file sortante) : un récepteur dont
+    /// l'émetteur se taisait restait figé « En cours » pour toujours.
+    private func interruptStalledIncomingTransfer(
+        transferID: UUID
+    ) {
+        transferTimeoutManager.cancel(
+            transferID: transferID
+        )
+
+        // Ferme le writer, conserve le `.partial`, marque `.interrupted`.
+        transferManager.interruptIncomingTransfer(
+            transferID: transferID
+        )
+
+        // Persiste la métadonnée de reprise (offset = taille réelle du
+        // `.partial`) pour une reprise après redémarrage.
+        transferManager.markInterrupted(
+            transferID: transferID,
+            transferredBytes: transferManager.incomingPartialFileBytes(
+                transferID: transferID
+            ),
+            protocolVersion: ProtocolCompatibility.currentVersion
+        )
+
+        logger.warning("Réception interrompue : plus aucun morceau reçu — \(transferID, privacy: .public)")
     }
 
     /// Fait passer un envoi actif à `.interrupted` : progression conservée,
@@ -1406,11 +1771,54 @@ final class AirBridgeCore {
         pendingApprovalCoordinator.requests
     }
 
+    /// Point unique de sortie de l'état « En attente » côté émetteur.
+    ///
+    /// Enregistre l'approbation du pair puis :
+    /// - démarre le pipeline si l'entrée est active ;
+    /// - laisse l'entrée en file démarrer à son activation (FIFO) ;
+    /// - sort explicitement de « En attente » un envoi dont l'entrée a
+    ///   disparu de la file ;
+    /// - **conserve un délai de sécurité** si le démarrage est reporté.
+    ///
+    /// Le délai d'approbation (300 s) n'est annulé que lorsque le
+    /// pipeline tourne réellement : l'annuler avant — comme c'était le cas
+    /// auparavant — laissait un transfert accepté mais non démarré bloqué
+    /// « En attente » sans aucun filet.
     private func markOutgoingTransferApproved(_ transferID: UUID) {
-        approvedOutgoingTransfers.insert(transferID)
-        if let entry = outgoingTransferQueue.allEntries.first(where: { $0.id == transferID }),
-           outgoingTransferQueue.isActive(transferID) {
-            beginOutgoingTransfer(entry)
+        guard approvedOutgoingTransfers.insert(transferID).inserted else {
+            logger.info("Acceptation déjà traitée : \(transferID, privacy: .public)")
+            return
+        }
+
+        guard let entry = outgoingTransferQueue.allEntries.first(where: {
+            $0.id == transferID
+        }) else {
+            transferTimeoutManager.cancel(transferID: transferID)
+            recoverOrphanedApprovedTransfer(transferID: transferID)
+            return
+        }
+
+        guard outgoingTransferQueue.isActive(transferID) else {
+            // File FIFO strictement sérialisante : l'entrée démarrera à son
+            // activation (`activateOutgoingTransfer`). Le délai
+            // d'approbation n'a plus d'objet ; le délai d'activité prendra
+            // le relais dès le premier chunk.
+            transferTimeoutManager.cancel(transferID: transferID)
+            logger.info("Transfert accepté, en file derrière l’envoi actif : \(entry.fileName, privacy: .public)")
+            return
+        }
+
+        switch beginOutgoingTransfer(entry) {
+        case .started, .alreadyRunning, .finishedInError:
+            transferTimeoutManager.cancel(transferID: transferID)
+            logger.info("Transfert accepté : \(transferID, privacy: .public)")
+
+        case .deferred(let reason):
+            logger.warning("Transfert accepté mais démarrage reporté : \(reason, privacy: .public)")
+            armAcceptedStartTimeout(
+                transferID: transferID,
+                reason: reason
+            )
         }
     }
 
@@ -1931,10 +2339,23 @@ final class AirBridgeCore {
                             if outcome == .accepted {
                                 // Auto-acceptation : on confirme immédiatement
                                 // à l'émetteur, sans passer par la feuille.
-                                self.connectionManager.sendTransferAccepted(
+                                // Un échec d'émission ne doit pas rester
+                                // silencieux : sans confirmation, l'émetteur
+                                // attend son acceptation indéfiniment.
+                                if !self.connectionManager.sendTransferAccepted(
                                     transferID: request.transferID,
                                     on: connection
-                                )
+                                ) {
+                                    self.logger.error("Auto-acceptation non transmise à l’émetteur : \(request.fileName, privacy: .public)")
+                                    self.transferManager.markFailed(
+                                        transferID: request.transferID,
+                                        reason: "Acceptation non transmise à l’émetteur"
+                                    )
+                                    self.transferManager.cancelIncomingTransfer(
+                                        transferID: request.transferID
+                                    )
+                                    return
+                                }
                             }
                         } else {
                             outcome = await self.transferManager.createIncomingTransfer(
@@ -2001,58 +2422,45 @@ final class AirBridgeCore {
            
                 
             case let .transferAccepted(message, _):
-                
-                
                 guard let payloadData = message.payload else {
                     logger.error("Acceptation sans payload")
                     return
                 }
-                
+
                 do {
                     let payload = try messageCodec.decodePayload(
                         TransferAcceptedPayload.self,
                         from: payloadData
                     )
 
+                    guard transferManager.hasTransfer(
+                        transferID: payload.transferID
+                    ) else {
+                        logger.error("Acceptation pour un transfert inconnu : \(payload.transferID, privacy: .public)")
+                        return
+                    }
+
                     guard senderOwnsTransfer(
                         payload.transferID,
                         sender: message.sender
-                    ), transferManager.hasTransfer(transferID: payload.transferID) else {
-                        logger.error("Acceptation refusée : transfert non attribué à ce sender")
+                    ) else {
+                        // Le transfert existe mais n’est pas attribué à ce
+                        // pair : l’acceptation est écartée. Cause réelle de
+                        // blocage « En attente » côté émetteur, elle est
+                        // donc tracée avec le pair incriminé.
+                        logger.error("Acceptation refusée : transfert non attribué à \(message.sender.name, privacy: .public)")
                         return
                     }
 
-                    guard approvedOutgoingTransfers.insert(
-                        payload.transferID
-                    ).inserted else {
-                        logger.info(
-                            "Acceptation déjà traitée : \(payload.transferID, privacy: .public)"
-                        )
-                        return
-                    }
+                    // Toute la sortie de l’état « En attente » est
+                    // concentrée là : démarrage, mise en file, ou filet de
+                    // sécurité si le démarrage est reporté.
+                    markOutgoingTransferApproved(payload.transferID)
 
-                    transferTimeoutManager.cancel(
-                        transferID: payload.transferID
-                    )
-
-                    guard let entry = outgoingTransferQueue.allEntries.first(where: {
-                        $0.id == payload.transferID
-                    }) else {
-                        return
-                    }
-
-                    if outgoingTransferQueue.isActive(payload.transferID) {
-                        beginOutgoingTransfer(entry)
-                    }
-
-                    logger.info("Transfert accepté : \(payload.transferID, privacy: .public)")
-
-                    
-                    
                 } catch {
                     logger.error("Acceptation invalide : \(error.localizedDescription, privacy: .public)")
                 }
-                
+
                 
             case let .transferRejected(message, _):
                 guard let payloadData = message.payload else {
@@ -2321,6 +2729,7 @@ final class AirBridgeCore {
                     logger.info("Pairage réussi avec \(info.peerName, privacy: .public)")
                     // Empreinte omise volontairement : matériel cryptographique
                     // sensible, jamais journalisé.
+                    retryDeferredApprovalRequests()
                 case .invalidSignature:
                     logger.error("Signature de pairage invalide de \(message.sender.name, privacy: .public)")
                 case .challengeMismatch:
@@ -2354,6 +2763,7 @@ final class AirBridgeCore {
             switch verifyResult {
             case .success(let info):
                 logger.info("Pair \(info.peerName, privacy: .public) authentifié (signature ECDSA valide)")
+                retryDeferredApprovalRequests()
             case .invalidSignature:
                 logger.error("Signature de pairage invalide de \(message.sender.name, privacy: .public) — réponse non envoyée")
                 return
@@ -2424,6 +2834,11 @@ final class AirBridgeCore {
             switch result {
             case .success(let info):
                 logger.info("Pairage confirmé avec \(info.peerName, privacy: .public)")
+                // La clé long-terme du pair est désormais enregistrée : les
+                // contrôles qu'il nous envoie (dont `transferAccepted`)
+                // peuvent être authentifiés. Les annonces reportées par la
+                // barrière de pairage sont rejouées immédiatement.
+                retryDeferredApprovalRequests()
             case .invalidSignature:
                 logger.error("Signature de pairage invalide de \(message.sender.name, privacy: .public)")
             case .challengeMismatch:
@@ -2789,6 +3204,12 @@ final class AirBridgeCore {
         if let activeEntry = outgoingTransferQueue.activeEntry {
             activateOutgoingTransfer(activeEntry)
         }
+
+        // Les entrées d'un lot dont l'annonce avait été reportée (session
+        // non prête, pairage non enregistré) sont rejouées : seule l'entrée
+        // active était retentée auparavant.
+        retryDeferredApprovalRequests()
+
         scheduleAutomaticResumeOnReconnect()
     }
 
@@ -3261,27 +3682,57 @@ final class AirBridgeCore {
 
 
 
+    /// Accepte le lot de demandes en attente et en prévient l'émetteur.
+    ///
+    /// L'acceptation est **transmise avant** d'être affichée localement.
+    /// Auparavant, `markAccepted` précédait un envoi dont le résultat était
+    /// ignoré : quand l'émission échouait (session tombée entre la demande
+    /// et le geste, connexion périmée, clé de session absente), le
+    /// récepteur affichait « Accepté » pendant que l'émetteur restait
+    /// « En attente » — les deux écrans se contredisaient et rien ne se
+    /// terminait jamais. En cas d'échec d'émission, le transfert entrant
+    /// passe en échec avec un motif explicite.
     func acceptPendingTransfer() {
         let requests = pendingRequests()
-        guard let connection = requests.first?.connection else {
+
+        guard !requests.isEmpty else {
             logger.info("Aucune demande de transfert à accepter")
             return
         }
 
+        var acceptedCount = 0
+
         for request in requests {
             let transferID = request.request.transferID
+
+            let sent = connectionManager.sendTransferAccepted(
+                transferID: transferID,
+                on: request.connection
+            )
+
+            guard sent else {
+                logger.error("Acceptation non transmise à l’émetteur : \(request.request.fileName, privacy: .public)")
+
+                transferManager.markFailed(
+                    transferID: transferID,
+                    reason: "Acceptation non transmise à l’émetteur"
+                )
+                transferManager.cancelIncomingTransfer(
+                    transferID: transferID
+                )
+                continue
+            }
+
             transferManager.markAccepted(
                 transferID: transferID
             )
-            connectionManager.sendTransferAccepted(
-                transferID: transferID,
-                on: connection
-            )
+            acceptedCount += 1
+
             logger.info("Demande acceptée : \(request.request.fileName, privacy: .public)")
         }
 
         logger.info(
-            "Autorisation groupée : \(requests.count) fichier(s) accepté(s)"
+            "Autorisation groupée : \(acceptedCount)/\(requests.count) fichier(s) accepté(s)"
         )
 
         pendingApprovalCoordinator.clear()
@@ -3291,7 +3742,8 @@ final class AirBridgeCore {
         reason: String? = nil
     ) {
         let requests = pendingRequests()
-        guard let connection = requests.first?.connection else {
+
+        guard !requests.isEmpty else {
             logger.info("Aucune demande de transfert à refuser")
             return
         }
@@ -3305,11 +3757,18 @@ final class AirBridgeCore {
             transferManager.cancelIncomingTransfer(
                 transferID: transferID
             )
-            connectionManager.sendTransferRejected(
+
+            // Le refus local est acquis (l'utilisateur a tranché) ; un échec
+            // d'émission est tracé : l'émetteur retombera sur son propre
+            // délai d'approbation plutôt que d'attendre indéfiniment.
+            if !connectionManager.sendTransferRejected(
                 transferID: transferID,
                 reason: reason,
-                on: connection
-            )
+                on: request.connection
+            ) {
+                logger.error("Refus non transmis à l’émetteur : \(request.request.fileName, privacy: .public)")
+            }
+
             logger.error("Demande refusée : \(request.request.fileName, privacy: .public)")
         }
 
