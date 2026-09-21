@@ -68,6 +68,7 @@ final class TransferManager {
         chunkOffset: Int64,
         chunkData: Data,
         isLastChunk: Bool = false,
+        chunkSize: Int = 0,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         // Pipeline configuration: 5 chunks in flight (was 2)
