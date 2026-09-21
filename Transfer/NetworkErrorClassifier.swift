@@ -38,35 +38,43 @@ nonisolated enum NetworkErrorClassifier {
 
         if let outgoingError = error as? OutgoingTransferManager
             .OutgoingTransferManagerError {
-            switch outgoingError {
-            case .encodingError:
+            // Ne pas utiliser de `switch` ici : selon la version de Swift/Xcode,
+            // le compilateur peut analyser le type imbriqué comme une enum dont
+            // les cas ne sont pas tous visibles dans ce fichier et signaler à
+            // tort « Switch must be exhaustive », même avec un `default`.
+            if case .encodingError = outgoingError {
                 // Une erreur d'encodage locale (fichier illisible, payload
                 // malformé) n'est pas une perte de liaison : elle se
                 // reproduira à l'identique à chaque tentative.
                 return false
-            case .sendError(let underlying):
+            }
+
+            if case .sendError(let underlying) = outgoingError {
                 // Emballage d'une erreur d'envoi : c'est la cause brute qui
                 // décide (ECONNRESET → récupérable, cause métier → non).
                 return isRecoverableNetworkInterruption(underlying)
-            case .noActiveConnection, .secureSessionNotReady:
-                // Gardes de session : la liaison sécurisée n'est pas encore
-                // disponible ou vient de tomber (clé ECDH / sessionId absents,
-                // connexion perdue). Les octets déjà transférés restent
-                // reprenables une fois la session rétablie — même traitement
-                // que `ConnectionManagerError` ci-dessus.
-                return true
-            case .sourceNotFound, .fileNotFound:
-                // Gardes de source : la source a été libérée avec la session,
-                // mais rien n'invalide les octets déjà transférés.
-                return true
-            default:
-                // Cas non répertorié (le switch reste exhaustif si
-                // `OutgoingTransferManagerError` s'enrichit) : rien ne prouve
-                // une perte de liaison, on applique donc la règle par défaut
-                // de la fonction — échec définitif — plutôt qu'une reprise
-                // vouée à rééchouer à l'identique.
-                return false
             }
+
+            if case .noActiveConnection = outgoingError {
+                return true
+            }
+
+            if case .secureSessionNotReady = outgoingError {
+                return true
+            }
+
+            if case .sourceNotFound = outgoingError {
+                return true
+            }
+
+            if case .fileNotFound = outgoingError {
+                return true
+            }
+
+            // Cas non répertorié : rien ne prouve une perte de liaison, on
+            // applique donc la règle par défaut de la fonction — échec
+            // définitif — plutôt qu'une reprise vouée à rééchouer à l'identique.
+            return false
         }
 
         if let urlError = error as? URLError {
