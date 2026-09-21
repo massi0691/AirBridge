@@ -7,16 +7,31 @@ import Foundation
 
 struct Transfer: Identifiable, Sendable {
 
-    enum Direction: Sendable {
+    /// Conformance `Equatable` (synthétisée : enum sans valeur
+    /// associée). Requise par les comparaisons d'état du Core
+    /// (`transfer.state == .interrupted`), du ViewModel et des tests
+    /// (`XCTAssertEqual`) — sans elle, ces comparaisons ne compilent
+    /// pas.
+    enum Direction: Sendable, Equatable {
         case incoming
         case outgoing
     }
 
-    enum State: Sendable {
+    enum State: Sendable, Equatable {
         case requesting
         case waitingForApproval
         case accepted
         case transferring
+
+        /// Tous les octets ont été envoyés et le `transferCompleted` a
+        /// été émis : l'émetteur attend la validation finale du
+        /// récepteur (`transferSucceeded`), qui seule autorise le
+        /// passage à `.completed`.
+        ///
+        /// Cet état n'existe que côté émetteur : le récepteur valide
+        /// dans son handler `transferCompleted` sans état intermédiaire.
+        case awaitingConfirmation
+
         case interrupted
         case completed
         case rejected
@@ -29,6 +44,7 @@ struct Transfer: Identifiable, Sendable {
             case .waitingForApproval: "En attente"
             case .accepted: "Accepté"
             case .transferring: "En cours"
+            case .awaitingConfirmation: "Validation du récepteur"
             case .interrupted: "Interrompu"
             case .completed: "Réussi"
             case .rejected: "Refusé"
@@ -45,6 +61,7 @@ struct Transfer: Identifiable, Sendable {
                  .waitingForApproval,
                  .accepted,
                  .transferring,
+                 .awaitingConfirmation,
                  .interrupted:
                 false
             case .completed,

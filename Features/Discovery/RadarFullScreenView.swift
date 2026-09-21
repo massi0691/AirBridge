@@ -40,7 +40,11 @@ struct RadarFullScreenView: View {
     @Environment(\.scenePhase)
     private var scenePhase
 
-    enum ConnectionState {
+    /// Conformance `Equatable` (synthétisée : enum sans valeur
+    /// associée) — requise par les comparaisons
+    /// `connectionState == .connecting` ; sans elle elles ne
+    /// compilent pas.
+    enum ConnectionState: Equatable {
         case idle
         case connecting
         case connected

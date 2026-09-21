@@ -13,12 +13,16 @@ import Observation
 @Observable
 final class AirBridgeSession: Identifiable {
 
-    enum Direction {
+    /// Conformances `Equatable` (synthétisées : enums sans valeur
+    /// associée) — requises par les comparaisons d'état et de
+    /// direction (`session?.direction == .outgoing`, etc.) ; sans
+    /// elles elles ne compilent pas.
+    enum Direction: Equatable {
         case incoming
         case outgoing
     }
 
-    enum State {
+    enum State: Equatable {
         case connecting
         case ready
         case waiting

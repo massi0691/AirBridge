@@ -11,7 +11,11 @@ import Foundation
 /// portrait est à l'étroit, un iPad ou une fenêtre macOS ne le sont pas.
 /// Raisonner en largeur plutôt qu'en système couvre donc aussi l'iPad et une
 /// fenêtre partagée, que `#if os(iOS)` seul confondrait avec un iPhone.
-enum ActionLabelWidth: Sendable {
+/// Conformance `Equatable` (synthétisée : enum sans valeur
+/// associée) — requise par les comparaisons
+/// `actionLabelWidth == .compact` de `DiscoveryView` ; sans elle
+/// elles ne compilent pas.
+enum ActionLabelWidth: Sendable, Equatable {
 
     /// Une seule ligne étroite : les intitulés doivent tenir en un mot.
     case compact

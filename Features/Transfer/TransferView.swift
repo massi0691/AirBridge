@@ -15,7 +15,10 @@ import SwiftUI
 /// right now"), while "Terminés" exposes the Core's history
 /// ledger. The split mirrors the "Live / Archive" mental model of
 /// the legacy transfer list.
-enum TransferTab: String, CaseIterable, Identifiable {
+/// Conformance `Equatable` (synthétisée : enum sans valeur
+/// associée) — requise par `selectedTab == .completed` ; sans elle
+/// la comparaison ne compile pas.
+enum TransferTab: String, CaseIterable, Identifiable, Equatable {
     case active = "Actifs"
     case completed = "Terminés"
 
@@ -915,6 +918,7 @@ private extension TransferUIStatus {
         switch self {
         case .waiting: AirBridgeDesign.Color.info
         case .active: AirBridgeDesign.Color.accent
+        case .awaitingConfirmation: AirBridgeDesign.Color.info
         case .completed: AirBridgeDesign.Color.success
         case .failed: AirBridgeDesign.Color.warning
         case .cancelled: AirBridgeDesign.Color.error

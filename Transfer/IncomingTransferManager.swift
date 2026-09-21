@@ -11,7 +11,10 @@ import OSLog
 ///
 /// Un booléen ne suffisait pas : « écartée » et « déjà connue » demandent
 /// des réponses opposées à l'émetteur.
-enum IncomingRequestOutcome: Sendable {
+/// Conformance `Equatable` (synthétisée : enum sans valeur
+/// associée) — requise par `outcome == .accepted` dans
+/// `AirBridgeCore` ; sans elle la comparaison ne compile pas.
+enum IncomingRequestOutcome: Sendable, Equatable {
 
     /// Réception préparée ; le fichier peut être soumis à l'utilisateur.
     case accepted
@@ -312,7 +315,11 @@ final class IncomingTransferManager {
         case .accepted, .transferring, .interrupted:
             break
 
-        case .requesting, .waitingForApproval,
+        // `.awaitingConfirmation` est un état émetteur : un transfert
+        // entrant ne l'atteint jamais, et un morceau reçu pour un
+        // transfert sortant en attente de confirmation n'a rien à
+        // faire ici.
+        case .requesting, .waitingForApproval, .awaitingConfirmation,
              .completed, .rejected, .cancelled, .failed:
 
             logger.debug("Morceau ignoré : transfert en état « \(transfer.state.displayName, privacy: .public) »")
@@ -715,7 +722,10 @@ final class IncomingTransferManager {
                 case .requesting, .waitingForApproval,
                      .accepted, .transferring, .interrupted:
                     return true
-                case .completed, .rejected, .cancelled, .failed:
+                // État émetteur uniquement : jamais atteint côté
+                // réception, mais l'exhaustivité l'exige ici.
+                case .awaitingConfirmation,
+                     .completed, .rejected, .cancelled, .failed:
                     return false
                 }
             }

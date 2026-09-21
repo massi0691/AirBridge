@@ -7,7 +7,11 @@
 
 import Foundation
 
-enum AirBridgeMessageType: String, Codable, Sendable {
+/// Conformance `Equatable` (synthétisée : enum sans valeur
+/// associée) — requise par les comparaisons de routage des messages
+/// (`message.type == .fileChunk`, etc.) ; sans elle elles ne
+/// compilent pas.
+enum AirBridgeMessageType: String, Codable, Sendable, Equatable {
     case hello
     case acknowledgement
 

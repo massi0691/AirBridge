@@ -25,6 +25,31 @@
 			</array>
 		</dict>
 	</array>
+	<!--
+		Ouverture de documents (Fichiers iOS « Ouvrir avec AirBridge »,
+		Finder macOS « Ouvrir avec »). AirBridge se déclare spectateur
+		(rôle Viewer, rang Alternate) de tout élément de fichier : il
+		n'usurpe jamais l'application par défaut d'un type de document,
+		mais apparaît dans les destinations d'ouverture. Combiné à
+		LSSupportsOpeningDocumentsInPlace, le système remet une URL
+		file:// à l'app (onOpenURL / application(_:open:)), routée vers
+		la feuille d'envoi sans envoi automatique.
+	-->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Tout type de document</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_airbridge._tcp</string>

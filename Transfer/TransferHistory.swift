@@ -16,12 +16,16 @@ struct TransferHistoryEntry: Codable, Identifiable, Sendable, Hashable {
     let sha256: String?
 }
 
-enum TransferDirection: String, Codable {
+/// Conformances `Equatable` (synthétisées : enums sans valeur
+/// associée) — requises par les comparaisons
+/// `historyEntry.direction == .sent` et `status == .completed` de
+/// `TransferViewModel` ; sans elles elles ne compilent pas.
+enum TransferDirection: String, Codable, Equatable {
     case sent = "sent"
     case received = "received"
 }
 
-enum TransferStatus: String, Codable {
+enum TransferStatus: String, Codable, Equatable {
     case completed = "completed"
     case failed = "failed"
     case cancelled = "cancelled"

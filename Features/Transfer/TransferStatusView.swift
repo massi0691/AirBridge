@@ -57,6 +57,12 @@ private extension TransferUIStatus {
         switch self {
         case .waiting: "hourglass"
         case .active: "arrow.down.circle"
+
+        // Bouclier (et non checkmark vert) : la validation du
+        // récepteur est en cours, le transfert N'est PAS encore
+        // réussi.
+        case .awaitingConfirmation: "checkmark.shield"
+
         case .completed: "checkmark.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
         case .cancelled: "xmark.circle.fill"
@@ -67,6 +73,11 @@ private extension TransferUIStatus {
         switch self {
         case .waiting: AirBridgeDesign.Color.info
         case .active: AirBridgeDesign.Color.accent
+
+        // Bleu « info », volontairement distinct du vert `success` :
+        // le vert de réussite n'apparaît qu'après `transferSucceeded`.
+        case .awaitingConfirmation: AirBridgeDesign.Color.info
+
         case .completed: AirBridgeDesign.Color.success
         case .failed: AirBridgeDesign.Color.warning
         case .cancelled: AirBridgeDesign.Color.error

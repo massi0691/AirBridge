@@ -24,7 +24,7 @@ struct TransferProgressView: View {
     /// (compact, slides in from the leading edge) and the
     /// "Terminés" tab uses a hero card (full-bleed, lands from
     /// below).
-    enum Layout {
+    enum Layout: Equatable {
         case activeRow
         case completedCard
     }
@@ -104,6 +104,7 @@ struct TransferProgressView: View {
         static let completedRaw = 2
         static let failedRaw = 3
         static let cancelledRaw = 4
+        static let awaitingConfirmationRaw = 5
 
         let raw: Int
         init(_ status: TransferUIStatus) {
@@ -113,6 +114,7 @@ struct TransferProgressView: View {
             case .completed: self.raw = StatusTag.completedRaw
             case .failed:    self.raw = StatusTag.failedRaw
             case .cancelled: self.raw = StatusTag.cancelledRaw
+            case .awaitingConfirmation: self.raw = StatusTag.awaitingConfirmationRaw
             }
         }
     }
@@ -127,8 +129,10 @@ struct TransferProgressView: View {
         case StatusTag.cancelledRaw: Haptics.warning()
         case StatusTag.failedRaw:    Haptics.error()
         default:
-            // `.waiting` (0) and `.active` (1) — intermediate
-            // states, no haptic.
+            // `.waiting` (0), `.active` (1) et
+            // `.awaitingConfirmation` (5) — états intermédiaires,
+            // aucun haptique : la réussite n'est haptiquement
+            // confirmée qu'après le `transferSucceeded`.
             break
         }
     }
@@ -270,7 +274,9 @@ struct TransferProgressView: View {
     @ViewBuilder
     private var trailingAction: some View {
         switch model.status {
-        case .active, .waiting:
+        // L'attente de confirmation reste annulable : le transfert
+        // n'est pas terminal tant que le récepteur n'a pas validé.
+        case .active, .waiting, .awaitingConfirmation:
             Button(role: .destructive) {
                 onCancel()
             } label: {
@@ -405,6 +411,9 @@ private extension TransferUIStatus {
         switch self {
         case .waiting: AirBridgeDesign.Color.info
         case .active: AirBridgeDesign.Color.accent
+        // Bleu info : la barre reste à 100 % SANS vert de réussite
+        // tant que le récepteur n'a pas confirmé.
+        case .awaitingConfirmation: AirBridgeDesign.Color.info
         case .completed: AirBridgeDesign.Color.success
         case .failed: AirBridgeDesign.Color.warning
         case .cancelled: AirBridgeDesign.Color.error

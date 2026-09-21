@@ -1069,6 +1069,20 @@ final class AirBridgeCore {
             logger.error("Impossible d'envoyer transferCompleted : session sécurisée non disponible")
             return
         }
+
+        // Les données sont intégralement parties : le transfert passe
+        // en « Validation du récepteur ». La progression est figée à
+        // 100 % (dernier offset consommé) MAIS le transfert n'est PAS
+        // terminé : seul le `transferSucceeded` du récepteur — envoyé
+        // après son contrôle SHA-256 et l'enregistrement du fichier —
+        // déclenchera le `markCompleted` (handler
+        // `handleTransferSucceeded`). Le protocole est inchangé :
+        // toujours aucun ACK par chunk.
+        transferManager.markAwaitingConfirmation(
+            transferID: transferID,
+            transferredBytes: lastOffsetConsumed
+        )
+
         transferTimeoutManager.cancel(transferID: transferID)
         transferTimeoutManager.start(
             transferID: transferID,
