@@ -55,7 +55,7 @@ final class TransferStore {
         switch transfer.state {
         case .completed, .rejected, .cancelled, .failed: return true
         case .requesting, .waitingForApproval, .accepted,
-             .transferring, .interrupted: return false
+             .transferring, .awaitingConfirmation, .interrupted: return false
         }
     }
 
@@ -104,6 +104,25 @@ final class TransferStore {
         transfers[index].state = .transferring
         transfers[index].startedAt = transfers[index].startedAt ?? Date()
         transfers[index].chunkCount += 1
+    }
+
+    /// Fait passer un transfert sortant à `.awaitingConfirmation` :
+    /// tous les octets ont été envoyés, le `transferCompleted` est parti,
+    /// et la validation du récepteur (`transferSucceeded`) est attendue.
+    ///
+    /// La progression est ramenée à 100 % (dernier offset consommé par
+    /// le pipeline) : l'interface affiche « 100 % — Validation du
+    /// récepteur » sans jamais présenter le transfert comme réussi
+    /// avant confirmation. Non terminal : annulable, interruptible
+    /// (déconnexion), et sans `completedAt`.
+    func markAwaitingConfirmation(
+        transferID: UUID,
+        transferredBytes: Int64
+    ) {
+        guard let index = index(of: transferID) else { return }
+        let fileSize = transfers[index].fileSize
+        transfers[index].transferredBytes = min(max(transferredBytes, 0), fileSize)
+        transfers[index].state = .awaitingConfirmation
     }
 
     func setSHA256(transferID: UUID, sha256: String) {
@@ -189,6 +208,13 @@ final class TransferStore {
                 transfers[index].state = .interrupted
                 interruptedIDs.append(transfers[index].id)
 
+            // Une déconnexion pendant la fenêtre de confirmation ne
+            // perd rien : tous les octets sont partis, la reprise
+            // renverra le `transferCompleted` et réarmera l'attente.
+            case .awaitingConfirmation:
+                transfers[index].state = .interrupted
+                interruptedIDs.append(transfers[index].id)
+
             case .completed, .rejected, .cancelled, .failed, .interrupted:
                 break
             }
@@ -209,6 +235,11 @@ final class TransferStore {
         for index in transfers.indices {
             switch transfers[index].state {
             case .requesting, .waitingForApproval, .accepted, .transferring:
+                transfers[index].state = .cancelled
+                transfers[index].completedAt = Date()
+            // L'attente de confirmation reste annulable comme tout
+            // transfert actif : le pair tranchera de son côté.
+            case .awaitingConfirmation:
                 transfers[index].state = .cancelled
                 transfers[index].completedAt = Date()
             case .completed, .rejected, .cancelled, .failed:

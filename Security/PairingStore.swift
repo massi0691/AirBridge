@@ -6,7 +6,10 @@ import Foundation
 import CryptoKit
 
 /// État de confiance d'un pair.
-enum TrustState: String, Codable, Sendable, CaseIterable {
+/// Conformance `Equatable` (synthétisée : enum sans valeur
+/// associée) — requise par les comparaisons `trustState == .trusted`
+/// de la sécurité et des vues ; sans elle elles ne compilent pas.
+enum TrustState: String, Codable, Sendable, CaseIterable, Equatable {
     /// Pair jamais vu : aucune interaction, aucune preuve d'identité.
     case unknown
 

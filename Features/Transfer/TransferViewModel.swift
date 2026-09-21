@@ -29,9 +29,21 @@ import SwiftUI
 /// states are protocol-level plumbing that the user does not need to
 /// distinguish. The screen groups them into five buckets the user
 /// can act on: waiting, active, completed, failed, cancelled.
-enum TransferUIStatus: Sendable {
+/// Conformance `Equatable` : enum sans valeur associée, l'égalité est
+/// synthétisée par le compilateur. Elle est requise par
+/// `shouldRecompute` (détection du changement de statut pour le
+/// republication UI throttlée) — sans elle, le `!=` de la ligne
+/// correspondante ne compile pas.
+enum TransferUIStatus: Sendable, Equatable {
     case waiting
     case active
+
+    /// Données intégralement envoyées : le récepteur valide
+    /// (SHA-256 + enregistrement) avant que le transfert ne soit
+    /// déclaré réussi. Distinct de `.completed` : le vert de succès
+    /// ne doit apparaître qu'après le `transferSucceeded`.
+    case awaitingConfirmation
+
     case completed
     case failed
     case cancelled
@@ -40,6 +52,7 @@ enum TransferUIStatus: Sendable {
         switch self {
         case .waiting: "En attente"
         case .active: "En cours"
+        case .awaitingConfirmation: "Validation du récepteur"
         case .completed: "Réussi"
         case .failed: "Échec"
         case .cancelled: "Annulé"
@@ -48,7 +61,12 @@ enum TransferUIStatus: Sendable {
 }
 
 /// Direction surfaced to the transfer screen.
-enum TransferUIDirection: Sendable {
+///
+/// Conformance `Equatable` (synthétisée : enum sans valeur
+/// associée) — requise par les comparaisons `model.direction ==
+/// .incoming` des vues (`FileActionSheet`, `TransferProgressView`,
+/// `TransferView`) ; sans elle elles ne compilent pas.
+enum TransferUIDirection: Sendable, Equatable {
     case incoming
     case outgoing
 }
@@ -262,6 +280,22 @@ final class TransferViewModel {
             // publish immediately.
             republisher.flush()
             return true
+
+        // 100 % envoyé, progression figée : seuls les changements
+        // d'état (vers `.completed` / `.failed`) nécessitent une
+        // republication — même logique que les états terminaux.
+        case .awaitingConfirmation:
+            if let cached = projectionCache[transfer.id] {
+                let stateChanged = Self.status(for: transfer.state) != cached.model.status
+                if stateChanged {
+                    republisher.flush()
+                }
+                return stateChanged
+                    || transfer.transferredBytes != cached.model.transferredBytes
+            }
+            republisher.flush()
+            return true
+
         case .requesting, .waitingForApproval, .accepted:
             republisher.submit(publishVersion)
             return true
@@ -641,6 +675,13 @@ final class TransferViewModel {
             // "your transfer didn't go through, here's what to do
             // next". The Retry button is what differs.
             return .failed
+
+        // 100 % envoyé, validation du récepteur en cours : statut
+        // dédié, volontairement distinct de `.completed` — jamais de
+        // vert de succès avant le `transferSucceeded`.
+        case .awaitingConfirmation:
+            return .awaitingConfirmation
+
         case .requesting,
              .waitingForApproval,
              .accepted,
@@ -720,6 +761,7 @@ private extension TransferUIStatus {
         case .cancelled: return .cancelled
         case .waiting: return .waitingForApproval
         case .active: return .transferring
+        case .awaitingConfirmation: return .awaitingConfirmation
         }
     }
 }

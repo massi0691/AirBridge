@@ -199,60 +199,109 @@ struct AirBridgeApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
-            Group {
-                if let coreHolder {
-                    MainView(
-                        core: coreHolder.core,
-                        pendingShareController: pendingShareController
-                    )
-                    .environment(notificationManager)
-                } else {
-                    Color.clear
-                        .onAppear {
-                            coreHolder = CoreHolder(
-                                notificationManager: notificationManager
-                            )
+        workspaceScene
+    }
 
-                            // L'extension de partage (Share Extension iOS,
-                            // Finder Service macOS) a pu copier un lot avant
-                            // notre démarrage (notification Darwin reçue avant
-                            // l'init du Core, ou feuille fermée par le
-                            // système) : purge des fichiers livrés puis
-                            // présentation du lot le plus récent. Aucun envoi
-                            // automatique ici.
-                            sweepPendingShares()
+#if os(macOS)
+    /// Fenêtre macOS : taille initiale 1280 × 820, librement
+    /// redimensionnable ensuite.
+    private var workspaceScene: some Scene {
+        WindowGroup {
+            rootContent
+        }
+        .defaultSize(width: 1280, height: 820)
+    }
+#else
+    private var workspaceScene: some Scene {
+        WindowGroup {
+            rootContent
+        }
+    }
+#endif
+
+    @ViewBuilder
+    private var rootContent: some View {
+        Group {
+            if let coreHolder {
+                rootView(for: coreHolder)
+                    .environment(notificationManager)
+            } else {
+                Color.clear
+                    .onAppear {
+                        coreHolder = CoreHolder(
+                            notificationManager: notificationManager
+                        )
+
+                        // L'extension de partage (Share Extension iOS,
+                        // Finder Service macOS) a pu copier un lot avant
+                        // notre démarrage (notification Darwin reçue avant
+                        // l'init du Core, ou feuille fermée par le
+                        // système) : purge des fichiers livrés puis
+                        // présentation du lot le plus récent. Aucun envoi
+                        // automatique ici.
+                        sweepPendingShares()
 
 #if os(iOS)
-                            startPendingShareObserver()
+                        startPendingShareObserver()
 #endif
-                        }
-                }
+                    }
             }
-            .onChange(of: scenePhase) { _, newPhase in
-                // Retour au premier plan : le partage a pu être initié
-                // pendant que l'app était inactive (pas d'`onOpenURL`
-                // garanti) ; on survole les lots App Group à chaque
-                // activation.
-                if newPhase == .active { sweepPendingShares() }
-            }
-            .onOpenURL { url in
-                handleIncomingURL(url)
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(
-                    for: .airbridgeFilesReceived
-                )
-            ) { notification in
-                receiveSharedFiles(notification)
-            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            // Retour au premier plan : le partage a pu être initié
+            // pendant que l'app était inactive (pas d'`onOpenURL`
+            // garanti) ; on survole les lots App Group à chaque
+            // activation.
+            if newPhase == .active { sweepPendingShares() }
+        }
+        .onOpenURL { url in
+            handleIncomingURL(url)
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: .airbridgeFilesReceived
+            )
+        ) { notification in
+            receiveSharedFiles(notification)
         }
     }
 
-    /// Handles incoming URLs from Finder Service, Drop Zone or the
-    /// iOS Share Extension.
+    /// Vue racine par plateforme : espace de travail dédié macOS
+    /// (`MacTransferWorkspaceView` : sidebar + zone de dépôt + tableau
+    /// des transferts), interface existante (`MainView`) sur iOS.
+    @ViewBuilder
+    private func rootView(
+        for holder: CoreHolder
+    ) -> some View {
+#if os(macOS)
+        MacTransferWorkspaceView(
+            core: holder.core,
+            pendingShareController: pendingShareController
+        )
+#else
+        MainView(
+            core: holder.core,
+            pendingShareController: pendingShareController
+        )
+#endif
+    }
+
+    /// Handles incoming URLs from Finder Service, Drop Zone, the
+    /// iOS Share Extension, or a document opened from Files
+    /// (CFBundleDocumentTypes, `file://`).
     /// - Parameter url: The URL to process.
     private func handleIncomingURL(_ url: URL) {
+        // Ouverture directe d'un document (Fichiers → « Ouvrir avec
+        // AirBridge » via CFBundleDocumentTypes, ou double-clic Finder
+        // macOS) : même chemin que le Finder Service — présentation
+        // dans la feuille d'envoi SANS envoi automatique. La
+        // déduplication par signature du `PendingShareController`
+        // absorbe une double remise (AppDelegate macOS + onOpenURL).
+        if url.isFileURL {
+            importSharedURLs([url])
+            return
+        }
+
         guard url.scheme == "airbridge" else { return }
 
         guard url.host == "receive",

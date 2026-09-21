@@ -511,6 +511,26 @@ final class TransferManager {
         )
     }
 
+    /// Fin d'envoi des données : le transfert sortant passe à
+    /// `.awaitingConfirmation` en gardant une progression de 100 %.
+    ///
+    /// Appelé par `AirBridgeCore` juste après l'émission du
+    /// `transferCompleted` : le passage à `.completed` reste réservé au
+    /// `transferSucceeded` renvoyé par le récepteur (validation SHA-256
+    /// + enregistrement réussis). Non terminal : aucun enregistrement
+    /// d'historique ni purge de métadonnées de reprise ici — ceux-ci
+    /// appartiennent aux états terminaux (`markCompleted`,
+    /// `markFailed`, `markCancelled`).
+    func markAwaitingConfirmation(
+        transferID: UUID,
+        transferredBytes: Int64
+    ) {
+        store.markAwaitingConfirmation(
+            transferID: transferID,
+            transferredBytes: transferredBytes
+        )
+    }
+
     /// Repart l'horloge de durée du transfert : utilisé à la reprise, pour
     /// que le temps d'interruption ne soit pas compté dans le débit affiché
     /// (`recordHistory` divise la taille par cette durée).

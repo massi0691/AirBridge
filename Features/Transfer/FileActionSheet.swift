@@ -33,6 +33,7 @@ private extension TransferUIStatus {
         switch self {
         case .waiting: AirBridgeDesign.Color.info
         case .active: AirBridgeDesign.Color.accent
+        case .awaitingConfirmation: AirBridgeDesign.Color.info
         case .completed: AirBridgeDesign.Color.success
         case .failed: AirBridgeDesign.Color.warning
         case .cancelled: AirBridgeDesign.Color.error
