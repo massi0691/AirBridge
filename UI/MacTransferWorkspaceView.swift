@@ -20,7 +20,7 @@
 
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
+internal import UniformTypeIdentifiers
 
 /// Sections de la sidebar macOS, pilotées depuis `MacTransferWorkspaceView`.
 ///
@@ -141,7 +141,7 @@ struct MacTransferWorkspaceView: View {
         } detail: {
             workspaceDetail
         }
-        .navigationSplitViewStyle(.sidebarAndDetail)
+        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 820, minHeight: 520)
         .sheet(item: $presentedRequest) { _ in
             TransferRequestSheet(core: core)
