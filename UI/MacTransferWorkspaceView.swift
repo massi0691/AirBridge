@@ -19,10 +19,24 @@
 #if os(macOS)
 
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
 
-/// Filtres du tableau des transferts, pilotés depuis la sidebar.
+/// Sections de la sidebar macOS, pilotées depuis `MacTransferWorkspaceView`.
+///
+/// Deux sections ne pilotent pas le tableau des transferts :
+///   - `.devices` : découverte Bonjour, connexion et appairage. C'est la
+///     seule surface capable d'OUVRIR une session depuis le Mac (le reste
+///     de l'application — zone de dépôt, sélecteur de fichiers, partage —
+///     refuse d'agir tant qu'aucune session n'est établie).
+///   - `.settings` : réglages de l'application (dossier de réception,
+///     notifications, appareils appairés). Sans cette entrée, `SettingsView`
+///     n'était atteignable que depuis `MainView`, qui n'est plus montée sur
+///     macOS depuis le passage à cet espace de travail.
 enum MacTransferFilter: String, CaseIterable, Identifiable, Hashable {
+    /// Découverte / connexion / appairage (radar).
+    case devices
+
     /// Transferts vivants non terminaux (envoi, réception, attente de
     /// confirmation comprise).
     case active
@@ -33,21 +47,28 @@ enum MacTransferFilter: String, CaseIterable, Identifiable, Hashable {
     /// Journal des transferts terminés (`transferHistoryStore`).
     case history
 
+    /// Réglages de l'application.
+    case settings
+
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .devices: "Appareils"
         case .active: "En cours"
         case .all: "Tous"
         case .history: "Historique"
+        case .settings: "Réglages"
         }
     }
 
     var symbolName: String {
         switch self {
+        case .devices: "antenna.radiowaves.left.and.right"
         case .active: "arrow.triangle.2.circlepath"
         case .all: "tray.full"
         case .history: "clock.arrow.circlepath"
+        case .settings: "gearshape"
         }
     }
 }
@@ -93,12 +114,17 @@ struct MacTransferWorkspaceView: View {
 
     /// Sélection de la sidebar. Optionnelle comme la sélection de
     /// `MainView` (initialiseur `List(_:selection:)` à sélection
-    /// unique) ; `effectiveFilter` retombe sur « En cours » si la
+    /// unique) ; `effectiveFilter` retombe sur « Appareils » si la
     /// sélection est momentanément vide.
-    @State private var filter: MacTransferFilter? = .active
+    ///
+    /// L'ouverture se fait sur « Appareils » (comme l'onglet par défaut
+    /// de l'UI iPhone) : c'est le point d'entrée qui permet de lier un
+    /// appareil, sans quoi l'utilisateur ne voit qu'un tableau vide et
+    /// une zone de dépôt désactivée.
+    @State private var filter: MacTransferFilter? = .devices
 
     private var effectiveFilter: MacTransferFilter {
-        filter ?? .active
+        filter ?? .devices
     }
 
     @State private var isDropTargeted = false
@@ -216,9 +242,17 @@ struct MacTransferWorkspaceView: View {
                     systemImage: "antenna.radiowaves.left.and.right.slash"
                 )
                 .font(AirBridgeDesign.Typography.headline)
-                Text("Utilisez le radar depuis votre iPhone pour lier un appareil.")
-                    .font(AirBridgeDesign.Typography.caption)
-                    .foregroundStyle(.secondary)
+                Text(
+                    "Ouvrez « Appareils » pour rechercher un appareil "
+                    + "sur le même réseau."
+                )
+                .font(AirBridgeDesign.Typography.caption)
+                .foregroundStyle(.secondary)
+
+                Button("Rechercher un appareil") {
+                    filter = MacTransferFilter.devices
+                }
+                .controlSize(.small)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -234,12 +268,128 @@ struct MacTransferWorkspaceView: View {
 
     // MARK: - Détail
 
+    /// Colonne de détail : elle suit la section sélectionnée dans la
+    /// sidebar. « Appareils » et « Réglages » sont des sections
+    /// autonomes ; les trois filtres de transfert partagent la même
+    /// surface (zone de dépôt + tableau).
+    @ViewBuilder
     private var workspaceDetail: some View {
+        switch effectiveFilter {
+
+        case .devices:
+            devicesDetail
+
+        case .active, .all, .history:
+            transfersDetail
+
+        case .settings:
+            settingsDetail
+        }
+    }
+
+    /// Détail « Appareils » : bandeau d'état de la recherche Bonjour
+    /// (uniquement quand la recherche ne peut pas aboutir) au-dessus du
+    /// radar de découverte existant.
+    ///
+    /// Le radar est la surface déjà utilisée par l'UI iPhone
+    /// (`MainView.content(for: .devices)`) : il centralise découverte,
+    /// sélection d'un appareil → connexion, appairage et déconnexion.
+    /// Sa réutilisation évite toute divergence entre les deux
+    /// plateformes et n'introduit aucun nouveau chemin réseau.
+    private var devicesDetail: some View {
+        VStack(spacing: 0) {
+            if let issue = core.bonjourService.localNetworkIssue {
+                discoveryIssueBanner(issue)
+                Divider()
+            }
+            RadarFullScreenView(core: core)
+        }
+    }
+
+    /// Détail des sections de transfert : zone de dépôt + tableau.
+    private var transfersDetail: some View {
         VStack(spacing: 0) {
             dropZone
                 .padding(AirBridgeDesign.Spacing.md)
             Divider()
             transferTable
+        }
+    }
+
+    /// Détail « Réglages » : réglages de l'application (dossier de
+    /// réception, notifications, appareils appairés avec
+    /// confiance / blocage / oubli).
+    private var settingsDetail: some View {
+        SettingsView(
+            receivedFolderStore: core.receivedFolderStore,
+            notificationManager: core.notificationManager,
+            pairingStore: core.pairingStore
+        )
+    }
+
+    /// Bandeau affiché quand la recherche Bonjour ne peut pas aboutir
+    /// (autorisation « Réseau local » refusée sur macOS 15+, réseau
+    /// indisponible, publication impossible…). Sans lui, l'utilisateur
+    /// ne voyait qu'un radar vide, sans cause ni action possible.
+    private func discoveryIssueBanner(
+        _ message: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: AirBridgeDesign.Spacing.sm) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(AirBridgeDesign.Color.warning)
+
+            VStack(alignment: .leading, spacing: AirBridgeDesign.Spacing.xs) {
+                Text("Recherche d'appareils limitée")
+                    .font(AirBridgeDesign.Typography.headline)
+
+                Text(message)
+                    .font(AirBridgeDesign.Typography.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: AirBridgeDesign.Spacing.sm) {
+                    Button("Ouvrir Réglages Système") {
+                        openLocalNetworkSettings()
+                    }
+
+                    Button("Relancer la recherche") {
+                        restartDiscovery()
+                    }
+                }
+                .controlSize(.small)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(AirBridgeDesign.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial)
+    }
+
+    /// Relance la recherche Bonjour : un `NWBrowser` en échec
+    /// (`NoAuth`, réseau perdu) ne se relance pas tout seul — il faut
+    /// en créer un neuf. Utile aussi après l'octroi de l'autorisation
+    /// « Réseau local », qui exige un nouveau navigateur pour produire
+    /// des résultats.
+    private func restartDiscovery() {
+        core.bonjourService.stopDiscovery()
+        core.bonjourService.startDiscovery()
+    }
+
+    /// Ouvre le panneau « Réseau local » des Réglages Système. Le
+    /// deep-link n'est pas garanti selon les versions : on retombe sur
+    /// la racine de « Confidentialité et sécurité » si besoin.
+    private func openLocalNetworkSettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy"
+        ]
+
+        for candidate in candidates {
+            if let url = URL(string: candidate),
+               NSWorkspace.shared.open(url) {
+                return
+            }
         }
     }
 
@@ -442,6 +592,9 @@ struct MacTransferWorkspaceView: View {
             models = viewModel.outgoingUI + viewModel.incomingUI
         case .history:
             models = viewModel.historyUI()
+        case .devices, .settings:
+            // Sections autonomes : aucun transfert à projeter.
+            models = []
         }
 
         return models
@@ -451,6 +604,20 @@ struct MacTransferWorkspaceView: View {
 
     /// Nombre affiché dans le badge de la sidebar.
     private func badgeCount(for item: MacTransferFilter) -> Int {
+        switch item {
+        case .devices:
+            // Nombre d'appareils actuellement visibles sur le réseau.
+            return core.bonjourService.discoveredDevices.count
+        case .settings:
+            return 0
+        case .active, .all, .history:
+            return transferBadgeCount(for: item)
+        }
+    }
+
+    /// Badge des sections de transfert : elles dépendent du view model,
+    /// créé à l'apparition de la vue.
+    private func transferBadgeCount(for item: MacTransferFilter) -> Int {
         guard let viewModel else { return 0 }
         switch item {
         case .active:
@@ -461,6 +628,8 @@ struct MacTransferWorkspaceView: View {
                 + viewModel.incomingUI.count
         case .history:
             return viewModel.history.count
+        case .devices, .settings:
+            return 0
         }
     }
 

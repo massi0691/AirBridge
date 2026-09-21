@@ -33,8 +33,30 @@ final class BonjourService {
     let localDevice: Device
 
     private(set) var discoveredDevices: [DiscoveredDevice]  = []
-    
-    
+
+    /// Dernier incident de la publication Bonjour (`NWListener`).
+    private var advertisingIssue: String?
+
+    /// Dernier incident de la recherche Bonjour (`NWBrowser`).
+    private var browsingIssue: String?
+
+    /// Message destiné à l'UI quand la couche Bonjour ne peut pas
+    /// fonctionner normalement : autorisation « Réseau local » refusée
+    /// (macOS 15+ / iOS 14+), réseau indisponible, publication
+    /// impossible… `nil` quand tout va bien.
+    ///
+    /// Sans cet état, un refus d'autorisation se traduisait par un radar
+    /// vide à l'infini, sans cause visible : les erreurs de `NWBrowser`
+    /// et `NWListener` n'existaient que dans les logs, et l'utilisateur
+    /// n'avait aucune action à sa disposition.
+    ///
+    /// La recherche est prioritaire dans le message : c'est elle qui
+    /// conditionne l'apparition des appareils dans l'interface.
+    var localNetworkIssue: String? {
+        browsingIssue ?? advertisingIssue
+    }
+
+
     var onIncomingConnection: ((NWConnection) -> Void)?
 
     /// Signalé à chaque (re)découverte d'un appareil : permet au cœur de
@@ -62,6 +84,38 @@ final class BonjourService {
          
       return parameters
     }
+
+    // MARK: - Diagnostic réseau local
+
+    /// Vrai pour les erreurs Bonjour qui signalent un refus
+    /// d'autorisation plutôt qu'un incident réseau transitoire.
+    ///
+    /// `kDNSServiceErr_NoAuth` (-65555) est le code remonté quand
+    /// l'accès au réseau local n'est pas accordé à l'application
+    /// (macOS 15+ / iOS 14+) ; `kDNSServiceErr_PolicyDenied` (-72008)
+    /// apparaît quand la navigation sur ce type de service est
+    /// interdite. Dans les deux cas, le navigateur n'émet aucun
+    /// résultat tant que l'autorisation n'est pas accordée.
+    nonisolated private static func isAuthorizationError(
+        _ error: NWError
+    ) -> Bool {
+        guard case let .dns(code) = error else { return false }
+        return code == -65555 || code == -72008
+    }
+
+    /// Message affiché par l'UI pour expliquer qu'une étape Bonjour a
+    /// échoué et indiquer l'action à effectuer. Le texte est construit
+    /// ici (et non dans les vues) pour rester identique quel que soit
+    /// l'écran qui l'affiche.
+    nonisolated private static func localNetworkHint(
+        stage: String,
+        error: Error
+    ) -> String {
+        "\(stage) : \(error.localizedDescription). Vérifiez que « Réseau "
+        + "local » est autorisé pour AirBridge (Réglages Système → "
+        + "Confidentialité et sécurité → Réseau local)."
+    }
+
     
     
     private func extractTXTRecord(from metadata: NWBrowser.Result.Metadata?) ->(
@@ -133,13 +187,29 @@ final class BonjourService {
                         Self.staticLogger.info("Le service Bonjour est prêt sur le port \(port.rawValue)")
                     }
 
+                    Task { @MainActor [weak self] in
+                        self?.advertisingIssue = nil
+                    }
+
                 case .failed(let error):
 
                     Self.staticLogger.error("Le listener a échoué : \(error.localizedDescription, privacy: .public)")
 
+                    let issue = Self.localNetworkHint(
+                        stage: "La publication d'AirBridge sur le réseau local a échoué",
+                        error: error
+                    )
+                    Task { @MainActor [weak self] in
+                        self?.advertisingIssue = issue
+                    }
+
                 case .cancelled:
 
                     Self.staticLogger.info("Le listener a été arrêté")
+
+                    Task { @MainActor [weak self] in
+                        self?.advertisingIssue = nil
+                    }
 
                 default:
 
@@ -197,17 +267,47 @@ final class BonjourService {
             case .ready:
                 Self.staticLogger.info("La recherche Bonjour est prête")
 
+                Task { @MainActor [weak self] in
+                    self?.browsingIssue = nil
+                }
+
             case .failed(let error):
                 Self.staticLogger.error("La recherche Bonjour a échoué : \(error.localizedDescription, privacy: .public)")
 
+                let issue = Self.localNetworkHint(
+                    stage: "La recherche d'appareils a échoué",
+                    error: error
+                )
+                Task { @MainActor [weak self] in
+                    self?.browsingIssue = issue
+                }
+
             case .cancelled:
                 Self.staticLogger.info("La recherche Bonjour a été arrêtée")
+
+                Task { @MainActor [weak self] in
+                    self?.browsingIssue = nil
+                }
 
             case .setup:
                 Self.staticLogger.debug("Le navigateur est configuré")
 
             case .waiting(let error):
                 Self.staticLogger.debug("La recherche Bonjour attend : \(error.localizedDescription, privacy: .public)")
+
+                // Une attente n'est pas forcément une panne : on ne la
+                // remonte à l'UI que lorsqu'elle trahit un refus
+                // d'autorisation, sinon le bandeau clignoterait à chaque
+                // reconfiguration réseau.
+                if Self.isAuthorizationError(error) {
+                    let issue = Self.localNetworkHint(
+                        stage: "La recherche d'appareils est bloquée",
+                        error: error
+                    )
+                    Task { @MainActor [weak self] in
+                        self?.browsingIssue = issue
+                    }
+                }
 
             @unknown default:
                 Self.staticLogger.debug("État inconnu")
