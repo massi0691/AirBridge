@@ -119,6 +119,16 @@ final class AirBridgeCore {
     private func sendApprovalRequestIfNeeded(
         for entry: OutgoingTransferQueue.Entry
     ) {
+        // La queue peut être activée dès la connexion TCP, avant l'ECDH.
+        // Attendre ici plutôt que transformer cette attente normale en
+        // échec terminal ; `installSessionKeyAndMarkReady` réessaiera
+        // l'entrée active après le handshake.
+        guard connectionManager.isSecureSessionReady,
+              connectionManager.connectedDevice?.id == entry.peer.id else {
+            logger.info("Demande de transfert reportée : session sécurisée non prête")
+            return
+        }
+
         guard !approvalRequestsSent.contains(entry.id) else {
             return
         }
@@ -169,7 +179,9 @@ final class AirBridgeCore {
     private func beginOutgoingTransfer(
         _ entry: OutgoingTransferQueue.Entry
     ) {
-        guard outgoingTransferQueue.isActive(entry.id),
+        guard connectionManager.isSecureSessionReady,
+              connectionManager.connectedDevice?.id == entry.peer.id,
+              outgoingTransferQueue.isActive(entry.id),
               approvedOutgoingTransfers.contains(entry.id),
               startedOutgoingTransfers.insert(entry.id).inserted else {
             return
@@ -1012,15 +1024,18 @@ final class AirBridgeCore {
             return
         }
 
-        guard sentAnyChunk else {
-            // Fichier vide ou aucune lecture : on ne déclare pas
-            // succès, on marque l'échec pour éviter une complétion
-            // silencieuse qui ne déclencherait pas de `transferCompleted`.
-            transferTimeoutManager.cancel(transferID: transferID)
-            transferManager.markFailed(transferID: transferID)
-            finishOutgoingTransfer(transferID: transferID)
-            logger.error("Aucun morceau envoyé pour \(transferID, privacy: .public)")
-            return
+        // Un fichier vide (ou une reprise arrivée exactement à sa taille
+        // finale) n'a aucun chunk à envoyer. Il reste pourtant un transfert
+        // valide : `transferCompleted(totalBytes: 0)` permet au récepteur
+        // de finaliser son writer vide et de conserver le fichier.
+        if !sentAnyChunk {
+            guard expectedTotalSize == 0 || expectedTotalSize == nil else {
+                transferTimeoutManager.cancel(transferID: transferID)
+                transferManager.markFailed(transferID: transferID)
+                finishOutgoingTransfer(transferID: transferID)
+                logger.error("Aucun morceau pour un fichier non vide : \(transferID, privacy: .public)")
+                return
+            }
         }
 
         // 4. Garde-fou d'intégrité : on vérifie que la somme des chunks
@@ -1043,11 +1058,17 @@ final class AirBridgeCore {
 
         // 5. Envoi du `transferCompleted` et armement du timeout de
         //    confirmation finale. Identique à l'ancien chemin.
-        connectionManager.sendTransferCompleted(
+        guard connectionManager.sendTransferCompleted(
             transferID: transferID,
             totalBytes: lastOffsetConsumed,
             sha256: fileSHA256
-        )
+        ) else {
+            transferTimeoutManager.cancel(transferID: transferID)
+            transferManager.markFailed(transferID: transferID)
+            finishOutgoingTransfer(transferID: transferID)
+            logger.error("Impossible d'envoyer transferCompleted : session sécurisée non disponible")
+            return
+        }
         transferTimeoutManager.cancel(transferID: transferID)
         transferTimeoutManager.start(
             transferID: transferID,
@@ -1622,9 +1643,11 @@ final class AirBridgeCore {
                     self.initiatePairing(with: device, on: connection)
                 }
             }
-            // Une session vient de s'établir (état `.ready` confirmé) :
-            // c'est ici — et seulement ici — qu'une reprise peut partir.
-            self.scheduleAutomaticResumeOnReconnect()
+            // La connexion TCP est `.ready`, mais les contrôles de
+            // transfert restent volontairement bloqués jusqu'à la fin de
+            // l'ECDH/HKDF. La campagne de reprise est déclenchée depuis
+            // `installSessionKeyAndMarkReady`, après installation effective
+            // de la clé dans les deux gestionnaires.
         }
 
         connectionManager.onSessionClosed = { [weak self] lostPeer in
@@ -1666,7 +1689,9 @@ final class AirBridgeCore {
             // actif contre un nouveau `sessionId`, ce qui ferait rejeter
             // les chunks (l'AAD contient le sessionId).
             self.transferManager.outgoingManager.clearSessionKey()
-            self.transferManager.incomingManager.clearSessionKey()
+            Task { @MainActor [weak self] in
+                await self?.transferManager.incomingManager.clearSessionKeyAndWait()
+            }
             self.pendingECDHHandshake = nil
 
             if let identifiedPeer {
@@ -1783,9 +1808,13 @@ final class AirBridgeCore {
                     logger.info("Version du protocole négociée : v\(negotiatedVersion)")
                 }
 
-                self.connectionManager.sendAcknowledgement(
+                guard self.connectionManager.sendAcknowledgement(
                     on: connection
-                )
+                ) else {
+                    self.logger.error("Impossible d'envoyer l'ACK : identité locale non signable")
+                    self.connectionManager.disconnect()
+                    return
+                }
 
             case let .acknowledgement(message, _):
                 logger.info("Core : ACK reçu de \(message.sender.name, privacy: .public), version protocole: \(message.protocolVersion)")
@@ -1814,11 +1843,14 @@ final class AirBridgeCore {
                 // pour que le pair fasse de même.
                 self.handleKeyExchange(message: message, connection: connection)
 
-            case let .keyExchangeAck(message, _):
+            case let .keyExchangeAck(message, connection):
                 // Le pair a reçu notre `keyExchange` et nous renvoie sa clé
                 // publique. On dérive la clé symétrique et on l'installe
                 // dans les deux gestionnaires de chunks.
-                self.handleKeyExchangeAck(message: message)
+                self.handleKeyExchangeAck(
+                    message: message,
+                    connection: connection
+                )
 
 
             case let .unknown(message, _):
@@ -1834,6 +1866,11 @@ final class AirBridgeCore {
                     self.logger.info(
                         "Core : demande de transfert reçue de \(message.sender.name, privacy: .public)"
                     )
+
+                    guard self.connectionManager.isSecureSessionReady else {
+                        self.logger.error("Demande de transfert ignorée : session sécurisée non prête")
+                        return
+                    }
 
                     guard let payloadData = message.payload else {
                         self.logger.error("La demande de transfert ne contient aucun payload")
@@ -1963,12 +2000,11 @@ final class AirBridgeCore {
                         from: payloadData
                     )
 
-                    guard transferManager.hasTransfer(
-                        transferID: payload.transferID
-                    ) else {
-                        logger.info(
-                            "Acceptation ignorée pour un transfert inconnu : \(payload.transferID, privacy: .public)"
-                        )
+                    guard senderOwnsTransfer(
+                        payload.transferID,
+                        sender: message.sender
+                    ), transferManager.hasTransfer(transferID: payload.transferID) else {
+                        logger.error("Acceptation refusée : transfert non attribué à ce sender")
                         return
                     }
 
@@ -2016,6 +2052,14 @@ final class AirBridgeCore {
                         from: payloadData
                     )
                     
+                    guard senderOwnsTransfer(
+                        payload.transferID,
+                        sender: message.sender
+                    ) else {
+                        logger.error("transferRejected refusé : sender non propriétaire du transfert")
+                        return
+                    }
+
                     guard !transferManager.isTerminal(
                         transferID: payload.transferID
                     ) else {
@@ -2073,7 +2117,9 @@ final class AirBridgeCore {
                         from: payloadData
                     )
                     let transferID = payload.transferID
-                    guard let transfer = transferManager.transfers.first(where: { $0.id == transferID }) else {
+                    guard let transfer = transferManager.transfers.first(where: { $0.id == transferID }),
+                          senderOwnsTransfer(transferID, sender: message.sender) else {
+                        logger.error("resumeRequest refusé : sender non propriétaire du transfert")
                         return
                     }
                     if transfer.direction == .incoming {
@@ -2106,7 +2152,11 @@ final class AirBridgeCore {
                         from: payloadData
                     )
                     let transferID = payload.transferID
-                    guard transferManager.hasTransfer(transferID: transferID) else { return }
+                    guard transferManager.hasTransfer(transferID: transferID),
+                          senderOwnsTransfer(transferID, sender: message.sender) else {
+                        logger.error("resumeAccepted refusé : sender non propriétaire du transfert")
+                        return
+                    }
                     if let entry = outgoingTransferQueue.allEntries.first(where: { $0.id == transferID }) {
                         // reprendre à l'offset donné
                         // La source temporaire peut avoir disparu (nettoyage,
@@ -2374,6 +2424,33 @@ final class AirBridgeCore {
         }
     }
 
+    /// Vérifie qu'un contrôle de transfert concerne bien un transfert
+    /// appartenant au sender authentifié de la session. La signature du
+    /// message prouve l'identité du pair, mais ne lie pas à elle seule un
+    /// `transferID` à ce pair : cette liaison métier est donc répétée ici.
+    private func senderOwnsTransfer(
+        _ transferID: UUID,
+        sender: Device
+    ) -> Bool {
+        guard let transfer = transferManager.transfers.first(where: {
+            $0.id == transferID
+        }), transfer.peer.id == sender.id else {
+            return false
+        }
+
+        if let expectedKey = transfer.peer.publicKeyData,
+           expectedKey != sender.publicKeyData {
+            return false
+        }
+
+        if let persistedKey = pairingStore.pairing(for: sender.id)?.peerPublicKeyData,
+           persistedKey != sender.publicKeyData {
+            return false
+        }
+
+        return true
+    }
+
     /// Renvoie l'identité de l'appareil local (utilisée pour les payloads
     /// de pairage). On évite `connectionManager.connectedDevice` qui peut
     /// être nil selon le moment du cycle de connexion.
@@ -2415,8 +2492,15 @@ final class AirBridgeCore {
         message: AirBridgeMessage,
         connection: NWConnection
     ) {
+        guard !connectionManager.isSecureSessionReady else {
+            logger.error("keyExchange reçu après établissement de la session — connexion fermée")
+            failSecureHandshake(on: connection)
+            return
+        }
+
         guard let payloadData = message.payload else {
             logger.error("keyExchange sans payload")
+            failSecureHandshake(on: connection)
             return
         }
 
@@ -2441,10 +2525,13 @@ final class AirBridgeCore {
             // (c'est précisément le bug architectural que ce correctif
             // résout : l'UUID LOCAL du responder est écrasé par le
             // `sessionId` de l'initiator).
-            if hasAdoptedSessionIdFromKeyExchange,
-               let existing = connectionManager.getActiveSessionId(),
-               existing != payload.sessionId {
-                logger.warning("keyExchange avec sessionId divergent — ignoré (replay ou injection)")
+            if hasAdoptedSessionIdFromKeyExchange {
+                if connectionManager.getActiveSessionId() != payload.sessionId {
+                    logger.error("keyExchange avec sessionId divergent — connexion fermée")
+                    failSecureHandshake(on: connection)
+                } else {
+                    logger.warning("keyExchange reçu alors qu'un échange est déjà en cours — ignoré")
+                }
                 return
             }
 
@@ -2462,35 +2549,69 @@ final class AirBridgeCore {
                 sessionId: sharedSessionId
             )
 
-            // 2. Installation immédiate de la clé (on est celui qui a
-            //    reçu le `keyExchange` en premier : on peut déjà
-            //    chiffrer les chunks sortants et déchiffrer les
-            //    entrants).
-            installSessionKey(sessionKey)
+            // L'ack ne doit partir qu'après l'installation effective de
+            // la clé dans le chiffreur entrant actoriel. Sinon le pair
+            // pourrait considérer le handshake terminé et envoyer un
+            // chunk pendant que `ChunkSink` est encore en mode transparent.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard await self.installSessionKeyAndMarkReady(
+                    sessionKey,
+                    sessionId: sharedSessionId
+                ) else {
+                    self.logger.error("Impossible d'activer la session ECDH côté réception")
+                    self.failSecureHandshake(on: connection)
+                    return
+                }
 
-            // 3. Envoi de notre `keyExchangeAck` avec notre clé
-            //    publique et le sessionId partagé : le pair pourra
-            //    alors dériver la même clé symétrique et l'installer
-            //    de son côté.
-            connectionManager.sendKeyExchangeAck(
-                publicKey: handshake.publicKey,
-                sessionId: sharedSessionId,
-                on: connection
-            )
+                // Envoi de notre `keyExchangeAck` avec notre clé publique
+                // et le sessionId partagé : le pair pourra alors dériver
+                // la même clé symétrique et l'installer de son côté.
+                self.connectionManager.sendKeyExchangeAck(
+                    publicKey: handshake.publicKey,
+                    sessionId: sharedSessionId,
+                    on: connection
+                ) { [weak self] result in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        switch result {
+                        case .success:
+                            // L'ack est désormais en file après la mise en
+                            // place de la clé. Les contrôles de transfert
+                            // peuvent suivre dans l'ordre réseau.
+                            self.activateTransfersAfterSecureSession()
+                        case .failure(let error):
+                            self.logger.error("Échec d'envoi du keyExchangeAck : \(error.localizedDescription, privacy: .public)")
+                            self.failSecureHandshake(on: connection)
+                        }
+                    }
+                }
 
-            logger.info("Handshake ECDH terminé (côté réception, sessionId=\(sharedSessionId, privacy: .public))")
+                self.logger.info("Handshake ECDH terminé (côté réception, sessionId=\(sharedSessionId, privacy: .public))")
+            }
 
         } catch {
             logger.error("keyExchange invalide : \(error.localizedDescription, privacy: .public)")
+            failSecureHandshake(on: connection)
         }
     }
 
     /// Reçoit un `keyExchangeAck` du pair : on dérive la clé symétrique
     /// à partir de notre `SecureHandshake` en attente et de la clé
     /// publique du pair, puis on l'installe.
-    private func handleKeyExchangeAck(message: AirBridgeMessage) {
+    private func handleKeyExchangeAck(
+        message: AirBridgeMessage,
+        connection: NWConnection
+    ) {
+        guard !connectionManager.isSecureSessionReady else {
+            logger.error("keyExchangeAck reçu après établissement de la session — connexion fermée")
+            failSecureHandshake(on: connection)
+            return
+        }
+
         guard let payloadData = message.payload else {
             logger.error("keyExchangeAck sans payload")
+            failSecureHandshake(on: connection)
             return
         }
 
@@ -2501,6 +2622,7 @@ final class AirBridgeCore {
             )
             guard let activeSession = connectionManager.getActiveSessionId() else {
                 logger.error("keyExchangeAck sans session active")
+                failSecureHandshake(on: connection)
                 return
             }
             // Cohérence défensive : le responder doit renvoyer dans son
@@ -2511,12 +2633,13 @@ final class AirBridgeCore {
             // on ignore l'ack plutôt que de dériver une clé
             // incompatible.
             if payload.sessionId != activeSession {
-                logger.error("keyExchangeAck avec sessionId incohérent : \(payload.sessionId, privacy: .public) vs \(activeSession, privacy: .public) — ignoré")
+                logger.error("keyExchangeAck avec sessionId incohérent : \(payload.sessionId, privacy: .public) vs \(activeSession, privacy: .public) — connexion fermée")
+                failSecureHandshake(on: connection)
                 return
             }
             guard let handshake = pendingECDHHandshake else {
-                // On a déjà installé la clé (côté réception), ou on n'a
-                // jamais initié le handshake. Ignorer sans erreur.
+                logger.error("keyExchangeAck inattendu sans handshake en attente")
+                failSecureHandshake(on: connection)
                 return
             }
 
@@ -2524,12 +2647,25 @@ final class AirBridgeCore {
                 from: payload.publicKeyData,
                 sessionId: activeSession
             )
-            installSessionKey(sessionKey)
             pendingECDHHandshake = nil
-            logger.info("Handshake ECDH terminé (côté initiation)")
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard await self.installSessionKeyAndMarkReady(
+                    sessionKey,
+                    sessionId: activeSession
+                ) else {
+                    self.logger.error("Impossible d'activer la session ECDH côté initiation")
+                    self.failSecureHandshake(on: connection)
+                    return
+                }
+                self.activateTransfersAfterSecureSession()
+                self.logger.info("Handshake ECDH terminé (côté initiation)")
+            }
 
         } catch {
             logger.error("keyExchangeAck invalide : \(error.localizedDescription, privacy: .public)")
+            failSecureHandshake(on: connection)
         }
     }
 
@@ -2563,23 +2699,83 @@ final class AirBridgeCore {
                 sender: bonjourService.localDevice,
                 payload: payloadData
             )
-            connectionManager.send(
+            guard connectionManager.send(
                 message,
                 on: connection
-            )
+            ) else {
+                pendingECDHHandshake = nil
+                failSecureHandshake(on: connection)
+                return
+            }
             logger.info("Handshake ECDH initié")
         } catch {
             logger.error("Impossible d'initier le handshake ECDH : \(error.localizedDescription, privacy: .public)")
             pendingECDHHandshake = nil
+            failSecureHandshake(on: connection)
         }
     }
 
-    /// Installe la clé symétrique de session dans les deux gestionnaires
-    /// de chunks. Centralise l'appel pour que les deux côtés (initiation
-    /// et réception) partagent la même logique.
-    private func installSessionKey(_ key: SymmetricKey) {
+    /// Invalide immédiatement une négociation ECDH incomplète. Aucun état
+    /// de session ni aucune clé ne doit survivre à une erreur de décodage,
+    /// de dérivation ou d'envoi : la reconnexion repartira d'un handshake
+    /// neuf.
+    private func failSecureHandshake(on connection: NWConnection) {
+        guard connectionManager.session?.connection === connection else {
+            return
+        }
+
+        pendingECDHHandshake = nil
+        hasAdoptedSessionIdFromKeyExchange = false
+        connectionManager.resetSecureSession()
+        connectionManager.setActiveSessionId(nil)
+        transferManager.outgoingManager.clearSessionKey()
+        transferManager.outgoingManager.setSessionId(nil)
+        transferManager.incomingManager.clearSessionKey()
+        connectionManager.disconnect()
+    }
+
+    /// Installe la clé symétrique dans les deux gestionnaires puis lève la
+    /// barrière `ConnectionManager.isSecureSessionReady`. L'`await` est
+    /// indispensable : `ChunkSink` est un actor et une simple `Task {}`
+    /// laisserait une fenêtre où le pair pourrait envoyer un chunk avant
+    /// que le cipher entrant ne possède réellement sa clé.
+    @discardableResult
+    private func installSessionKeyAndMarkReady(
+        _ key: SymmetricKey,
+        sessionId: UUID
+    ) async -> Bool {
+        guard connectionManager.session != nil,
+              connectionManager.getActiveSessionId() == sessionId else {
+            return false
+        }
+
         transferManager.outgoingManager.installSessionKey(key)
-        transferManager.incomingManager.installSessionKey(key)
+        await transferManager.incomingManager.installSessionKeyAndWait(key)
+
+        guard connectionManager.session != nil,
+              connectionManager.getActiveSessionId() == sessionId else {
+            return false
+        }
+
+        connectionManager.markSecureSessionReady()
+        guard connectionManager.isSecureSessionReady else {
+            return false
+        }
+
+        return true
+    }
+
+    /// Déclenche les contrôles applicatifs seulement après que la trame
+    /// finale du handshake a été mise en file. Côté répondeur, l'appel est
+    /// différé jusqu'à l'envoi du `keyExchangeAck`, afin que le pair ait
+    /// installé sa propre clé avant de recevoir une annonce de transfert.
+    private func activateTransfersAfterSecureSession() {
+        guard connectionManager.isSecureSessionReady else { return }
+
+        if let activeEntry = outgoingTransferQueue.activeEntry {
+            activateOutgoingTransfer(activeEntry)
+        }
+        scheduleAutomaticResumeOnReconnect()
     }
 
     private func handleTransferCancelled(
@@ -2598,6 +2794,14 @@ final class AirBridgeCore {
                 TransferCancelledPayload.self,
                 from: payloadData
             )
+
+            guard senderOwnsTransfer(
+                payload.transferID,
+                sender: message.sender
+            ) else {
+                logger.error("transferCancelled refusé : sender non propriétaire du transfert")
+                return
+            }
 
             guard !transferManager.isTerminal(
                 transferID: payload.transferID
@@ -2729,6 +2933,11 @@ final class AirBridgeCore {
                 return
             }
 
+            guard senderOwnsTransfer(transferID, sender: message.sender) else {
+                logger.error("FileChunk refusé : sender non propriétaire du transfert")
+                return
+            }
+
             let wasWritten = await transferManager.appendReceivedChunk(
                 transferID: transferID,
                 offset: offset,
@@ -2761,6 +2970,14 @@ final class AirBridgeCore {
                 from: payloadData
             )
             
+            guard senderOwnsTransfer(
+                completed.transferID,
+                sender: message.sender
+            ) else {
+                logger.error("transferCompleted refusé : sender non propriétaire du transfert")
+                return
+            }
+
             guard !transferManager.isTerminal(
                 transferID: completed.transferID
             ) else {
@@ -2906,6 +3123,14 @@ final class AirBridgeCore {
                 from: payloadData
             )
 
+            guard senderOwnsTransfer(
+                payload.transferID,
+                sender: message.sender
+            ) else {
+                logger.error("transferSucceeded refusé : sender non propriétaire du transfert")
+                return
+            }
+
             guard !transferManager.isTerminal(
                 transferID: payload.transferID
             ) else {
@@ -2962,6 +3187,14 @@ final class AirBridgeCore {
                 TransferFailedPayload.self,
                 from: payloadData
             )
+
+            guard senderOwnsTransfer(
+                payload.transferID,
+                sender: message.sender
+            ) else {
+                logger.error("transferFailed refusé : sender non propriétaire du transfert")
+                return
+            }
 
             guard !transferManager.isTerminal(
                 transferID: payload.transferID
@@ -3211,8 +3444,19 @@ final class AirBridgeCore {
     }
 
     private func startIncomingResume(transferID: UUID) {
-        // Rouvrir le writer entrant à la taille réelle du `.partial` avant
-        // d'annoncer l'offset au pair : les chunks repris s'écriront dedans.
+        // Rouvrir le writer et installer son contexte de chunk avant
+        // d'annoncer l'offset au pair. Le transfert reste bloqué si la
+        // session ECDH n'est pas prête.
+        guard connectionManager.isSecureSessionReady,
+              let transfer = transferManager.transfers.first(where: {
+                  $0.id == transferID
+              }),
+              transfer.direction == .incoming,
+              transfer.peer.id == connectionManager.connectedDevice?.id else {
+            logger.info("Reprise entrante reportée : session sécurisée ou pair non correspondant")
+            return
+        }
+
         let offset = transferManager.incomingPartialFileBytes(
             transferID: transferID
         )
@@ -3222,22 +3466,25 @@ final class AirBridgeCore {
             return
         }
 
-        guard transferManager.reopenIncomingWriter(
-            transferID: transferID,
-            atOffset: offset
-        ) else {
-            logger.error("Reprise impossible : fichier partiel inaccessible")
-            return
-        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard await self.transferManager.reopenIncomingWriterAndWait(
+                transferID: transferID,
+                atOffset: offset
+            ) else {
+                self.logger.error("Reprise impossible : fichier partiel inaccessible")
+                return
+            }
 
-        guard transferManager.resumeIncomingTransfer(
-            transferID: transferID,
-            connectionManager: connectionManager
-        ) else {
-            return
-        }
+            guard self.transferManager.resumeIncomingTransfer(
+                transferID: transferID,
+                connectionManager: self.connectionManager
+            ) else {
+                return
+            }
 
-        logger.info("Reprise entrante demandée : \(transferID, privacy: .public) à \(offset)")
+            self.logger.info("Reprise entrante demandée : \(transferID, privacy: .public) à \(offset)")
+        }
     }
 
     private func startOutgoingResume(transferID: UUID) {
@@ -3246,6 +3493,7 @@ final class AirBridgeCore {
         // le resumeRequest partirait dans la file d'une connexion qui
         // expirera peut-être sans jamais l'émettre.
         guard connectionManager.isSessionReady,
+              connectionManager.isSecureSessionReady,
               connectionManager.connectedDevice?.id == transferManager.transfers
                   .first(where: { $0.id == transferID })?.peer.id else {
             logger.info("Pair non connecté : reprise reportée (\(transferID, privacy: .public))")

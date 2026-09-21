@@ -127,6 +127,9 @@ struct BinaryFileChunkPayload: Codable, Sendable {
         }
         let offsetData = data.subdata(in: offset..<offset+8)
         let chunkOffset = Int64(bitPattern: offsetData.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).bigEndian })
+        guard chunkOffset >= 0 else {
+            throw BinaryFileChunkError.invalidData("Offset négatif")
+        }
         offset += 8
 
         // Flags (UInt8)
@@ -149,7 +152,7 @@ struct BinaryFileChunkPayload: Codable, Sendable {
         offset += 16
 
         // Vérifier qu'il y a assez de données pour le chunk
-        guard data.count >= offset + length else {
+        guard data.count == offset + length else {
             throw BinaryFileChunkError.invalidData("Taille de données incohérente : \(data.count - offset) octets disponibles, \(length) attendus")
         }
 

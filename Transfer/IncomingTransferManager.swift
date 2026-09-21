@@ -91,16 +91,42 @@ final class IncomingTransferManager {
         Task { await self.sink.setCipher(cipher) }
     }
 
-    /// Réinitialise le chiffreur en mode transparent.
+    /// Variante attendue par le handshake : le retour ne survient qu'après
+    /// que l'actor de réception possède effectivement la clé.
+    func installSessionKeyAndWait(_ key: SymmetricKey) async {
+        await sink.setCipher(ChunkStreamCipher(key: key))
+    }
+
+    /// Réinitialise le chiffreur. Le chemin de production attend la fin de
+    /// cette opération avant d'autoriser une nouvelle session.
     func clearSessionKey() {
         Task { await self.sink.clearCipher() }
     }
 
-    /// Mémorise la taille de chunk négociée avec l'émetteur : nécessaire
-    /// au calcul cohérent du `chunkIndex` (qui entre dans l'AAD du
-    /// `ChunkStreamCipher`).
+    func clearSessionKeyAndWait() async {
+        await sink.clearCipher()
+    }
+
+    /// API historique pour les tests et les appels directs.
     func setNegotiatedChunkSize(_ size: Int) {
         Task { await self.sink.setNegotiatedChunkSize(size) }
+    }
+
+    /// Configure la taille de chunk et l'obligation de chiffrement pour un
+    /// transfert précis, dans le même ordre actoriel que les chunks.
+    func setNegotiatedChunkSize(_ size: Int, for transferID: UUID) {
+        Task { [sink] in
+            await sink.setNegotiatedChunkSize(size, for: transferID)
+            await sink.requireEncryption(for: transferID)
+        }
+    }
+
+    func setNegotiatedChunkSizeAndRequireEncryption(
+        _ size: Int,
+        for transferID: UUID
+    ) async {
+        await sink.setNegotiatedChunkSize(size, for: transferID)
+        await sink.requireEncryption(for: transferID)
     }
 
     // MARK: - Cycle de vie d'un transfert
@@ -193,7 +219,10 @@ final class IncomingTransferManager {
         do {
             try await sink.prepareWriter(for: transferID)
         } catch {
-            store.markFailed(transferID: transferID)
+            // Le tally et les métadonnées temporaires doivent être annulés
+            // si le disque ne permet pas de créer le writer. Sinon une
+            // annonce invalide consommerait définitivement le quota du lot.
+            rollbackAnnouncement(request)
             logger.error("Impossible de préparer le fichier temporaire : \(error.localizedDescription, privacy: .public)")
             return .rejected
         }
@@ -215,11 +244,34 @@ final class IncomingTransferManager {
         let negotiatedSize = TransferChunkSizing.chunkSize(
             forFileSize: request.fileSize
         )
-        self.setNegotiatedChunkSize(negotiatedSize)
+        await setNegotiatedChunkSizeAndRequireEncryption(
+            negotiatedSize,
+            for: transferID
+        )
 
         logger.info("Transfert entrant créé : \(request.fileName, privacy: .public)")
 
         return .accepted
+    }
+
+    /// Annule entièrement une annonce qui n'a pas pu devenir un writer
+    /// utilisable. Le quota est réservé seulement pendant la préparation.
+    private func rollbackAnnouncement(_ request: TransferRequestPayload) {
+        store.removeTransfer(transferID: request.transferID)
+        batchContexts[request.transferID] = nil
+
+        guard let batchID = request.batchID,
+              var tally = batchTallies[batchID] else {
+            return
+        }
+
+        tally.fileCount = max(0, tally.fileCount - 1)
+        tally.totalBytes = max(0, tally.totalBytes - request.fileSize)
+        if tally.fileCount == 0 {
+            batchTallies[batchID] = nil
+        } else {
+            batchTallies[batchID] = tally
+        }
     }
 
     // MARK: - Réception d'un chunk
@@ -488,6 +540,38 @@ final class IncomingTransferManager {
     /// `resumeRequest`), pas un chemin chaud. La création du writer
     /// est une opération `O(1)` sur disque (open + seek), pas un
     /// bottleneck à paralleliser.
+    /// Variante utilisée par le chemin de production : le retour ne
+    /// survient qu'après l'ouverture effective du writer et sa configuration
+    /// cryptographique.
+    func reopenWriterForResumeAndWait(
+        transferID: UUID,
+        atOffset offset: Int64
+    ) async -> Bool {
+        cancelledTransfers.remove(transferID)
+
+        let fileSize = store.transfer(withID: transferID)?.fileSize ?? 0
+        let chunkSize = TransferChunkSizing.chunkSize(forFileSize: fileSize)
+        let safeOffset = min(offset, partialFileBytes(transferID: transferID))
+
+        do {
+            await sink.setNegotiatedChunkSize(chunkSize, for: transferID)
+            await sink.requireEncryption(for: transferID)
+            _ = try await sink.reopenWriter(
+                for: transferID,
+                atOffset: safeOffset
+            )
+        } catch {
+            logger.error("Impossible de rouvrir le writer : \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+
+        store.updateProgress(
+            transferID: transferID,
+            transferredBytes: partialFileBytes(transferID: transferID)
+        )
+        return true
+    }
+
     func reopenWriterForResume(
         transferID: UUID,
         atOffset offset: Int64
@@ -506,23 +590,16 @@ final class IncomingTransferManager {
         // de l'AAD ChaCha20-Poly1305 et tous les chunks seraient
         // rejetés — ou pire, un décalage systématique dégraderait le
         // débit sans lever d'erreur visible.
-        if let fileSize = store.transfer(withID: transferID)?.fileSize,
-           fileSize > 0 {
-            setNegotiatedChunkSize(
-                TransferChunkSizing.chunkSize(forFileSize: fileSize)
-            )
-        }
-
-        // Le writer est rouvert sur l'actor. L'opération étant
-        // rapide (open + seek) et la reprise étant un chemin rare
-        // (déclenché par `resumeRequest`), on programme la
-        // création de façon asynchrone sans bloquer l'appelant.
-        // Si l'appelant envoie un chunk immédiatement après, il
-        // entrera dans l'actor et sera traité après la création
-        // du writer (l'actor sérialise ses requêtes dans l'ordre).
+        let fileSize = store.transfer(withID: transferID)?.fileSize ?? 0
+        let chunkSize = TransferChunkSizing.chunkSize(forFileSize: fileSize)
         let safeOffset = min(offset, partialFileBytes(transferID: transferID))
 
+        // Une seule transaction actorielle : configuration de la taille,
+        // obligation de chiffrement, puis ouverture du writer. Un chunk de
+        // reprise ne peut donc pas passer entre ces trois étapes.
         Task { [sink] in
+            await sink.setNegotiatedChunkSize(chunkSize, for: transferID)
+            await sink.requireEncryption(for: transferID)
             _ = try? await sink.reopenWriter(
                 for: transferID,
                 atOffset: safeOffset

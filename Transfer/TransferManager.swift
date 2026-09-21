@@ -103,12 +103,19 @@ final class TransferManager {
             return
         }
 
+        let effectiveChunkSize = chunkSize > 0
+            ? chunkSize
+            : TransferChunkSizing.chunkSize(
+                forFileSize: store.transfer(withID: transferID)?.fileSize ?? 0
+            )
+
         // Send chunk immediately via outgoingManager
         outgoingManager.sendChunk(
             transferID: transferID,
             offset: chunkOffset,
             data: chunkData,
-            isLastChunk: isLastChunk
+            isLastChunk: isLastChunk,
+            chunkSize: effectiveChunkSize
         ) { [weak self] result in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -392,9 +399,12 @@ final class TransferManager {
         transferID: UUID,
         connectionManager: ConnectionManager
     ) -> Bool {
-        guard store.isResumable(transferID: transferID),
+        guard connectionManager.isSessionReady,
+              connectionManager.isSecureSessionReady,
+              store.isResumable(transferID: transferID),
               let transfer = store.transfer(withID: transferID),
-              transfer.direction == .incoming else {
+              transfer.direction == .incoming,
+              transfer.peer.id == connectionManager.connectedDevice?.id else {
             logger.error("Impossible de reprendre : transfert non interrompu ou pas entrant")
             return false
         }
@@ -411,7 +421,7 @@ final class TransferManager {
         // inconnu du récepteur (il appartient à l'émetteur) : il reste vide,
         // l'intégrité finale étant assurée par le SHA-256 complet du
         // transfert terminé.
-        connectionManager.sendResumeRequest(
+        guard connectionManager.sendResumeRequest(
             transferID: transferID,
             receivedBytes: receivedBytes,
             fileSize: transfer.fileSize,
@@ -419,7 +429,10 @@ final class TransferManager {
             chunkSize: TransferChunkSizing.chunkSize(
                 forFileSize: transfer.fileSize
             )
-        )
+        ) else {
+            logger.error("Impossible d'envoyer la demande de reprise")
+            return false
+        }
 
         // Passer à l'état accepté pour que les chunks puissent être écrits
         store.markAccepted(transferID: transferID)
@@ -750,6 +763,16 @@ final class TransferManager {
 
     func reopenIncomingWriter(transferID: UUID, atOffset offset: Int64) -> Bool {
         return incomingManager.reopenWriterForResume(transferID: transferID, atOffset: offset)
+    }
+
+    func reopenIncomingWriterAndWait(
+        transferID: UUID,
+        atOffset offset: Int64
+    ) async -> Bool {
+        await incomingManager.reopenWriterForResumeAndWait(
+            transferID: transferID,
+            atOffset: offset
+        )
     }
 
     func resumeIncomingTransfer(

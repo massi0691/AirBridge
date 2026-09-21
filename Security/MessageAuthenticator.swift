@@ -12,9 +12,9 @@ import CryptoKit
 ///
 /// Les messages de contrôle (`hello`, `transferRequest`, `pairingRequest`,
 /// etc.) sont signés avec la clé privée locale. Le récepteur vérifie la
-/// signature avec la clé publique annoncée dans `sender`. Cela empêche
-/// un attaquant de rejouer ou de falsifier des messages au nom d'un pair
-/// de confiance.
+/// signature avec la clé publique annoncée dans `sender` puis, pour un
+/// pair connu, avec la clé persistée. Cela empêche un attaquant de rejouer
+/// ou de falsifier des messages au nom d'un pair de confiance.
 ///
 /// Les chunks de fichier (`fileChunk`) ne sont PAS signés ici : ils
 /// seraient signés un par un, ce qui coûte cher. La chaîne est protégée
@@ -40,18 +40,17 @@ enum MessageAuthenticator {
     ///
     /// - `.forbidden` : toujours `false` (un `fileChunk` v2 ne doit jamais
     ///   transiter ici).
-    /// - `.optionalLegacy` : mode permissif v1, message non signé accepté
-    ///   ; si une signature est présente, elle est vérifiée contre la
-    ///   clé publique **annoncée** (en v1 la clé du pair n'est pas fiable
-    ///   car non encore échangée de manière authentifiée).
+    /// - `.optionalLegacy` : ancienne valeur conservée pour compatibilité
+    ///   source, mais un message non signé reste rejeté ; une signature
+    ///   présente est vérifiée contre la clé publique **annoncée**.
     /// - `.required` : la signature doit être présente et valide contre
-    ///   la clé publique du `PairingStore` si elle existe (priorité à la
-    ///   clé de confiance persistée), sinon contre la clé publique
-    ///   annoncée. **Aucune exception** : sans signature valide, le
-    ///   message est rejeté.
+    ///   la clé publique du `PairingStore`. Si aucune clé n'est persistée,
+    ///   le message est rejeté : aucune mutation ne peut choisir sa propre
+    ///   identité. **Aucune exception** : sans signature valide, le message
+    ///   est rejeté.
     /// - `.requiredForKnownPeer` : la signature doit être présente et
-    ///   valide contre la clé publique **annoncée** (cas du tout premier
-    ///   contact, où le pair n'a pas encore été persisté).
+    ///   valide contre la clé publique long-terme **annoncée** (cas du tout
+    ///   premier contact, où le pair n'a pas encore été persisté).
     ///
     /// - Parameters:
     ///   - message: Message reçu.
@@ -77,14 +76,12 @@ enum MessageAuthenticator {
             return false
 
         case .optionalLegacy:
-            // Mode permissif v1 : message non signé accepté. Si une
-            // signature est présente, on la vérifie contre la clé
-            // publique *annoncée* (en v1 le store n'est pas fiable).
-            guard let signature = message.signature else {
-                return true
-            }
-            // Sans clé annoncée, on ne peut pas vérifier : rejet.
-            guard let advertisedKey = advertisedPublicKey else {
+            // Valeur conservée uniquement pour la compatibilité source avec
+            // d'anciens appelants. Elle ne constitue plus un mode permissif:
+            // un contrôle non signé est toujours rejeté, y compris si un
+            // appelant contourne `ProtocolCompatibility`.
+            guard let signature = message.signature,
+                  let advertisedKey = advertisedPublicKey else {
                 return false
             }
             let bytesToVerify = canonicalBytes(for: message)
@@ -102,10 +99,11 @@ enum MessageAuthenticator {
             guard let signature = message.signature else {
                 return false
             }
-            // La clé du store prime sur la clé annoncée. Si aucune des
-            // deux n'est disponible, le message ne peut pas être vérifié
-            // et est rejeté.
-            guard let keyToCheck = storePublicKey ?? advertisedPublicKey else {
+            // Un message hors liste de premier contact exige une identité
+            // déjà persistée. Ne jamais retomber sur la clé annoncée ici :
+            // cela permettrait à un pair inconnu de forger une mutation
+            // d'état en choisissant lui-même son identité.
+            guard let keyToCheck = storePublicKey else {
                 return false
             }
             let bytesToVerify = canonicalBytes(for: message)
@@ -137,23 +135,25 @@ enum MessageAuthenticator {
 
     /// Représentation canonique des octets signés d'un message.
     ///
-    /// On signe la concaténation stable de : `type`, `messageID`, et le
-    /// payload s'il existe. Cette construction ne dépend pas de
-    /// `sender` (l'identité est déjà liée à la signature par construction).
+    /// L'identité fait partie de la signature v2. On lie donc le contenu à
+    /// la combinaison `(version, sender.id, clé publique annoncée)` et non
+    /// seulement à la clé utilisée au moment de la vérification. Cela
+    /// empêche de réutiliser une signature avec un autre UUID ou une autre
+    /// clé publique dans l'enveloppe du message.
     ///
     /// IMPORTANT : la forme binaire de `uuid_t` n'est pas portable entre
-    /// plateformes (le padding interne peut varier entre iOS et macOS) ;
-    /// on utilise donc un encodage `JSON` avec `outputFormatting =
-    /// .sortedKeys` pour garantir un ordre de clés déterministe et
-    /// indépendant de la machine. Le `UUID` est sérialisé en `String`
-    /// (forme canonique `XXXXXXXX-XXXX-…`) et le `payload` (binaire)
-    /// est sérialisé en base64.
-    private static func canonicalBytes(
+    /// plateformes ; JSON trié est utilisé pour obtenir une représentation
+    /// déterministe. Les UUID sont des chaînes canoniques et les données
+    /// binaires sont encodées en base64.
+    static func canonicalBytes(
         for message: AirBridgeMessage
     ) -> Data {
         let fields = SignedMessageFields(
+            protocolVersion: message.protocolVersion,
             type: message.type.rawValue,
             messageID: message.messageID.uuidString,
+            senderID: message.sender.id.uuidString,
+            senderPublicKey: message.sender.publicKeyData?.base64EncodedString(),
             payload: message.payload?.base64EncodedString()
         )
         let encoder = JSONEncoder()
@@ -164,15 +164,11 @@ enum MessageAuthenticator {
 }
 
 /// Champs internes d'un message qui sont couverts par la signature.
-///
-/// Le `sender` n'est volontairement PAS inclus : l'identité de l'émetteur
-/// est déjà liée à la signature par construction (la signature est
-/// vérifiée avec la clé publique annoncée dans `sender`).
 private struct SignedMessageFields: Encodable {
-    /// `rawValue` du type de message.
+    let protocolVersion: Int
     let type: String
-    /// Forme canonique du `messageID` (UUID en hexadécimal avec tirets).
     let messageID: String
-    /// `payload` encodé en base64, ou `nil` si le message n'en a pas.
+    let senderID: String
+    let senderPublicKey: String?
     let payload: String?
 }

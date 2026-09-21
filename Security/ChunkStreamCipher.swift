@@ -25,28 +25,33 @@
 //  autre transfert ou d'une autre session sera rejeté à
 //  l'authentification.
 //
-//  Le chiffrement est volontairement **opt-in** : tant qu'une clé
-//  symétrique n'est pas installée via `installKey(_:)`, le codec
-//  fonctionne en mode transparent (le chunk passe en clair, comme
-//  avant). L'activation se fait au moment où le handshake sécurisé
-//  (ECDH P-256, planifié dans une phase ultérieure) aboutit.
+//  L'API historique reste transparente pour les outils et tests qui
+//  l'utilisent directement. Le transport v2 appelle uniquement
+//  `encryptChecked(_:)` et exige une clé dérivée par le handshake ECDH
+//  avant d'émettre le moindre chunk.
 
 import Foundation
 import CryptoKit
 
 /// Chiffrement symétrique d'un chunk binaire v2.
 ///
-/// Sans clé installée, `encrypt(_:)` et `decrypt(_:)` retournent les
-/// données inchangées (mode transparent). Avec une clé, ChaCha20-Poly1305
-/// est appliqué en flux : chaque chunk est scellé avec un nonce unique
-/// dérivé de `transferID + chunkIndex`, et un AAD qui lie le chunk à
-/// son transfert et à sa session.
+/// Sans clé installée, les API historiques `encrypt(_:)` et `decrypt(_:)`
+/// restent transparentes pour la compatibilité hors réseau. Le chemin v2
+/// utilise `encryptChecked(_:)` et refuse l'absence de clé. Avec une clé,
+/// ChaCha20-Poly1305 est appliqué en flux : chaque chunk est scellé avec
+/// un nonce unique dérivé de `transferID + chunkIndex`, et un AAD qui lie
+/// le chunk à son transfert et à sa session.
 ///
 /// `nonisolated` : la structure est immutable (`let key`), donc
 /// sans danger à utiliser depuis un actor de fond (le `ChunkSink`
 /// de la phase 2-bis). Le projet compile en `-default-isolation=MainActor`,
 /// ce qui rendrait la structure `@MainActor` par défaut ; on annule
 /// explicitement cet héritage ici.
+nonisolated enum ChunkStreamCipherError: Error, Sendable {
+    case encryptionFailed
+    case missingKey
+}
+
 nonisolated struct ChunkStreamCipher {
 
     /// Longueur du nonce ChaCha20-Poly1305 (12 octets, standard).
@@ -67,23 +72,17 @@ nonisolated struct ChunkStreamCipher {
         return key != nil
     }
 
-    /// Chiffre les données d'un chunk si une clé est installée.
-    ///
-    /// - Parameters:
-    ///   - plaintext: données brutes du chunk
-    ///   - transferID: identifiant du transfert
-    ///   - chunkIndex: index du chunk dans le transfert
-    ///   - sessionId: identifiant de la session active
-    /// - Returns: `nonce (12) || ciphertext || tag (16)` si une clé est
-    ///   installée, sinon les données brutes (mode transparent).
-    nonisolated func encrypt(
+    /// Version stricte utilisée par le protocole de transport. Elle ne
+    /// possède aucun fallback en clair : l'absence de clé ou un échec de
+    /// scellage annule le chunk.
+    nonisolated func encryptChecked(
         _ plaintext: Data,
         transferID: UUID,
         chunkIndex: UInt32,
         sessionId: UUID
-    ) -> Data {
-        guard let key = key else {
-            return plaintext
+    ) throws -> Data {
+        guard let key else {
+            throw ChunkStreamCipherError.missingKey
         }
 
         let nonce = Self.deriveNonce(
@@ -105,7 +104,6 @@ nonisolated struct ChunkStreamCipher {
                 authenticating: aad
             )
 
-            // Format : [nonce (12)][ciphertext][tag (16)]
             var output = Data()
             output.reserveCapacity(
                 Self.nonceSize + sealed.ciphertext.count + Self.tagSize
@@ -114,12 +112,30 @@ nonisolated struct ChunkStreamCipher {
             output.append(sealed.ciphertext)
             output.append(sealed.tag)
             return output
-
         } catch {
-            // En cas d'échec de scellage (très improbable), on retourne
-            // les données en clair plutôt que de bloquer l'envoi.
-            return plaintext
+            throw ChunkStreamCipherError.encryptionFailed
         }
+    }
+
+    /// Chiffre les données d'un chunk si une clé est installée.
+    ///
+    /// Cette API historique reste transparente pour les tests et les outils
+    /// de compatibilité. Le chemin réseau v2 doit utiliser
+    /// `encryptChecked(_:)` : il est interdit de transformer une erreur
+    /// cryptographique en données en clair.
+    nonisolated func encrypt(
+        _ plaintext: Data,
+        transferID: UUID,
+        chunkIndex: UInt32,
+        sessionId: UUID
+    ) -> Data {
+        guard hasKey else { return plaintext }
+        return (try? encryptChecked(
+            plaintext,
+            transferID: transferID,
+            chunkIndex: chunkIndex,
+            sessionId: sessionId
+        )) ?? Data()
     }
 
     /// Déchiffre les données d'un chunk si une clé est installée.
