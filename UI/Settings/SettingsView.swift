@@ -118,6 +118,10 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Réglages")
+#if os(macOS)
+        .scrollContentBackground(.hidden)
+        .background(Color(nsColor: .windowBackgroundColor))
+#endif
         .onAppear(perform: loadInitialPairings)
         .onChange(of: scenePhase) { _, newPhase in
             // Recharge la liste des pairages quand la scène redevient active

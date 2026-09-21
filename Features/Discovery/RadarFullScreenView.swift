@@ -110,11 +110,24 @@ struct RadarFullScreenView: View {
                     pairingViewModel: pairingViewModel
                 )
             } else {
-                Color.clear
-                    .onAppear {
-                        viewModel = DiscoveryViewModel(core: core)
-                        pairingViewModel = PairingViewModel(core: core)
-                    }
+                // Écran de chargement explicite : l'ancien `Color.clear`
+                // sans taille produisait une zone vide blanche dans la
+                // colonne de détail macOS (photo du bug). On affiche un
+                // indicateur avec une taille minimale pour que le
+                // `GeometryReader` parent reçoive un espace non nul.
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text("Recherche d'appareils…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minHeight: 300)
+                .task {
+                    viewModel = DiscoveryViewModel(core: core)
+                    pairingViewModel = PairingViewModel(core: core)
+                }
             }
         }
         .onAppear { isRadarActive = true }
@@ -134,22 +147,28 @@ struct RadarFullScreenView: View {
     ) -> some View {
         GeometryReader { geometry in
             ZStack {
-                // 1. Fond immersif en bas (ignore safe area)
+                // Fond adaptatif : sur iOS on veut un fond plein écran qui
+                // ignore les safe areas (comme AirDrop). Sur macOS, le radar
+                // vit dans une colonne de détail `NavigationSplitView` : on
+                // ne doit PAS ignorer les safe areas, sinon le fond déborde
+                // sous la toolbar et peut donner l'impression d'une fenêtre
+                // « cassée » (photo). Le parent `MacTransferWorkspaceView`
+                // fournit déjà le fond `windowBackgroundColor`.
+                #if os(iOS)
                 backgroundGradient
                     .ignoresSafeArea()
+                #else
+                backgroundGradient
+                #endif
 
-                // 2. Contenu en haut (respecte safe area)
                 VStack(spacing: 0) {
-                    // En-tête compact avec statut
                     headerSection(viewModel: viewModel)
                         .padding(.top, headerTopPadding)
                         .padding(.horizontal, horizontalPadding)
 
-                    // Espace fixe réduit entre header et radar
                     Spacer()
                         .frame(height: 8)
 
-                    // Radar central immersif - taille adaptative
                     radarSection(viewModel: viewModel)
                         .frame(
                             width: calculateRadarSize(for: geometry),
@@ -157,8 +176,6 @@ struct RadarFullScreenView: View {
                         )
                         .padding(radarPadding)
 
-                    // Espace restant : le radar reste centré verticalement
-                    // entre l'en-tête et le pied de page.
                     Spacer()
                 }
             }
@@ -210,20 +227,12 @@ struct RadarFullScreenView: View {
             .haloOpacity(colorScheme)
 
         return ZStack {
-            // Fond de base : suit le thème système, donc la surface se fond
-            // dans le reste de la fenêtre (macOS) ou de l'écran (iOS).
             AirBridgeDesign.Color.Radar.base
-                .ignoresSafeArea()
 
-            // Gradient radial depuis le centre. `.plusLighter` n'est utilisé
-            // qu'en mode sombre : sur un fond clair ce mode de fusion
-            // éclaircirait jusqu'au blanc pur et ferait disparaître le halo.
             RadialGradient(
                 colors: [
-                    AirBridgeDesign.Color.Radar.halo
-                        .opacity(haloOpacity.core),
-                    AirBridgeDesign.Color.Radar.halo
-                        .opacity(haloOpacity.edge),
+                    AirBridgeDesign.Color.Radar.halo.opacity(haloOpacity.core),
+                    AirBridgeDesign.Color.Radar.halo.opacity(haloOpacity.edge),
                     Color.clear
                 ],
                 center: .center,
@@ -231,18 +240,13 @@ struct RadarFullScreenView: View {
                 endRadius: 400
             )
             .blendMode(colorScheme == .dark ? .plusLighter : .normal)
-            .ignoresSafeArea()
 
-            // Particules subtiles (étoiles)
             particlesBackground
         }
     }
 
     private var particlesBackground: some View {
-        // Solution contre le layout récursif : GeometryReader externe
-        // Le Canvas n'a pas besoin de GeometryReader - il a accès à la taille
-        let particleOpacity = AirBridgeDesign.Color.Radar
-            .particleOpacity(colorScheme)
+        let particleOpacity = AirBridgeDesign.Color.Radar.particleOpacity(colorScheme)
         let particleColor = AirBridgeDesign.Color.Radar.particles
 
         return Canvas { context, size in
@@ -259,7 +263,6 @@ struct RadarFullScreenView: View {
                 )
             }
         }
-        .ignoresSafeArea()
     }
 
     // MARK: - Header
