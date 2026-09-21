@@ -29,6 +29,11 @@ struct RadarView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// Apparence effective : le balayage du radar est additif (`.plusLighter`)
+    /// en mode sombre, mais ce mode de fusion « grille » un fond clair. En mode
+    /// clair on repasse en fusion normale pour que le faisceau reste visible.
+    @Environment(\.colorScheme) private var colorScheme
+
     private let ringCount = 4
 
     /// Taille minimale du radar
@@ -101,10 +106,16 @@ struct RadarView: View {
 
     // MARK: - Subviews
 
+    /// Halo du cadran : peinture d'accent très diluée, donc adaptative
+    /// (aucun gris système codé en dur qui trancherait avec le fond).
     private var background: some View {
-        RadialGradient(
+        let haloOpacity = AirBridgeDesign.Color.Radar
+            .haloOpacity(colorScheme)
+
+        return RadialGradient(
             colors: [
-                Color.accentColor.opacity(0.10),
+                AirBridgeDesign.Color.Radar.halo
+                    .opacity(haloOpacity.core),
                 Color.clear
             ],
             center: .center,
@@ -119,7 +130,7 @@ struct RadarView: View {
             let r = radius * CGFloat(index + 1) / CGFloat(ringCount)
             Circle()
                 .stroke(
-                    Color.secondary.opacity(0.18),
+                    AirBridgeDesign.Color.Radar.rings,
                     lineWidth: 1
                 )
                 .frame(width: r * 2, height: r * 2)
@@ -136,7 +147,9 @@ struct RadarView: View {
                     gradient: Gradient(colors: [
                         Color.accentColor.opacity(0.0),
                         Color.accentColor.opacity(0.0),
-                        Color.accentColor.opacity(0.18),
+                        Color.accentColor.opacity(
+                            colorScheme == .dark ? 0.18 : 0.22
+                        ),
                         Color.accentColor.opacity(0.0)
                     ]),
                     center: .center
@@ -149,7 +162,7 @@ struct RadarView: View {
                 AirBridgeDesign.radarSweepAnimation,
                 value: isActive
             )
-            .blendMode(.plusLighter)
+            .blendMode(colorScheme == .dark ? .plusLighter : .normal)
     }
 
     private func localBubble(center: CGPoint) -> some View {

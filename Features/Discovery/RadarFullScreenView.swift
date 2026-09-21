@@ -14,7 +14,7 @@ import OSLog
 /// Vue radar immersive plein écran remplaçant l'ancienne DiscoveryView.
 ///
 /// Fonctionnalités :
-/// - Fond sombre/gradient élégant
+/// - Fond adapté au thème système (clair OU sombre, jamais un mélange)
 /// - Radar avec appareils en bulles arrondies
 /// - Animations d'apparition/disparition (scale + opacity)
 /// - Sélection tap → pairing automatique
@@ -39,6 +39,12 @@ struct RadarFullScreenView: View {
 
     @Environment(\.scenePhase)
     private var scenePhase
+
+    /// Apparence effective de la surface. Le radar ne force **plus** le mode
+    /// sombre : il lit le thème système (ou celui imposé par un ancêtre) et
+    /// adapte fond, halo, particules et mode de fusion en conséquence.
+    @Environment(\.colorScheme)
+    private var colorScheme
 
     /// Conformance `Equatable` (synthétisée : enum sans valeur
     /// associée) — requise par les comparaisons
@@ -156,14 +162,13 @@ struct RadarFullScreenView: View {
                     Spacer()
                 }
             }
-            // Le radar est volontairement sombre (fond noir, textes clairs en
-            // dur). La bulle `DeviceRadarItem`, elle, utilise `.primary`/
-            // `.secondary` : sans lumières forcées, `.primary` serait noir en
-            // mode clair système et la bulle deviendrait invisible. On force
-            // donc le mode sombre sur le contenu du radar uniquement — les
-            // sheets présentées au-dessus (`PairingConfirmationView`,
-            // `ShareView`) gardent leur propre style système.
-            .preferredColorScheme(.dark)
+            // Cohérence d'apparence : la surface radar ne force plus le mode
+            // sombre. Elle suit le thème système, comme la barre latérale, la
+            // barre d'outils et les feuilles — plus jamais de fenêtre macOS
+            // « mélangée » (détail noir dans une fenêtre claire).
+            //
+            // Les feuilles présentées au-dessus (`PairingConfirmationView`,
+            // `ShareView`) héritent elles aussi du thème système.
         }
         // Pied de page ancré au-dessus de la TabBar / de la home indicator
         // via l'inset de safe area : aucune hauteur fixe codée en dur
@@ -195,24 +200,37 @@ struct RadarFullScreenView: View {
 
     // MARK: - Background
 
+    /// Fond immersif **adaptatif** : la couleur de base suit l'apparence du
+    /// système (`windowBackgroundColor` sur macOS, `systemBackground` sur
+    /// iOS), le halo d'accent est plus discret en mode clair, et les
+    /// particules passent par `.primary` pour rester lisibles dans les deux
+    /// thèmes. Aucun noir / blanc codé en dur.
     private var backgroundGradient: some View {
-        ZStack {
-            // Fond sombre de base
-            Color.black
+        let haloOpacity = AirBridgeDesign.Color.Radar
+            .haloOpacity(colorScheme)
+
+        return ZStack {
+            // Fond de base : suit le thème système, donc la surface se fond
+            // dans le reste de la fenêtre (macOS) ou de l'écran (iOS).
+            AirBridgeDesign.Color.Radar.base
                 .ignoresSafeArea()
 
-            // Gradient radial depuis le centre
+            // Gradient radial depuis le centre. `.plusLighter` n'est utilisé
+            // qu'en mode sombre : sur un fond clair ce mode de fusion
+            // éclaircirait jusqu'au blanc pur et ferait disparaître le halo.
             RadialGradient(
                 colors: [
-                    Color.accentColor.opacity(0.15),
-                    Color.accentColor.opacity(0.08),
+                    AirBridgeDesign.Color.Radar.halo
+                        .opacity(haloOpacity.core),
+                    AirBridgeDesign.Color.Radar.halo
+                        .opacity(haloOpacity.edge),
                     Color.clear
                 ],
                 center: .center,
                 startRadius: 50,
                 endRadius: 400
             )
-            .blendMode(.plusLighter)
+            .blendMode(colorScheme == .dark ? .plusLighter : .normal)
             .ignoresSafeArea()
 
             // Particules subtiles (étoiles)
@@ -223,17 +241,21 @@ struct RadarFullScreenView: View {
     private var particlesBackground: some View {
         // Solution contre le layout récursif : GeometryReader externe
         // Le Canvas n'a pas besoin de GeometryReader - il a accès à la taille
-        Canvas { context, size in
+        let particleOpacity = AirBridgeDesign.Color.Radar
+            .particleOpacity(colorScheme)
+        let particleColor = AirBridgeDesign.Color.Radar.particles
+
+        return Canvas { context, size in
             for i in 0..<30 {
                 let hash = abs(i.hashValue)
                 let x = CGFloat((hash & 0xFF)) / 255.0 * size.width
                 let y = CGFloat(((hash >> 8) & 0xFF)) / 255.0 * size.height
                 let opacity = Double(((hash >> 16) & 0xFF)) / 255.0 * 0.3 + 0.1
 
-                context.opacity = opacity
+                context.opacity = opacity * particleOpacity
                 context.fill(
                     Circle().path(in: CGRect(x: x, y: y, width: 2, height: 2)),
-                    with: .color(.white)
+                    with: .color(particleColor)
                 )
             }
         }
@@ -248,13 +270,13 @@ struct RadarFullScreenView: View {
                 Text("AirBridge")
                     .font(AirBridgeDesign.Typography.title2)
                     .fontWeight(.semibold)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(AirBridgeDesign.Color.Radar.title)
 
                 HStack(spacing: AirBridgeDesign.Spacing.xs) {
                     statusIndicator(viewModel: viewModel)
                     Text(statusText(viewModel: viewModel))
                         .font(AirBridgeDesign.Typography.subheadline)
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(AirBridgeDesign.Color.Radar.subtitle)
                 }
             }
 
@@ -265,11 +287,11 @@ struct RadarFullScreenView: View {
                 Text("\(viewModel.discoveredDevices.count)")
                     .font(AirBridgeDesign.Typography.caption)
                     .fontWeight(.medium)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(AirBridgeDesign.Color.Radar.title)
                     .frame(minWidth: 28, minHeight: 28)
                     .background(
                         Circle()
-                            .fill(Color.accentColor.opacity(0.3))
+                            .fill(Color.accentColor.opacity(0.22))
                     )
                     .overlay(
                         Circle()
@@ -283,7 +305,13 @@ struct RadarFullScreenView: View {
         Circle()
             .fill(statusColor(viewModel: viewModel))
             .frame(width: 8, height: 8)
-            .shadow(color: statusColor(viewModel: viewModel), radius: 4)
+            // Le halo lumineux n'a de sens que sur fond sombre : en mode
+            // clair, une ombre colorée autour d'une pastille de 8 pt
+            // ressemble à une bavure. D'où le rayon conditionné au thème.
+            .shadow(
+                color: statusColor(viewModel: viewModel),
+                radius: colorScheme == .dark ? 4 : 0
+            )
     }
 
     private func statusColor(viewModel: DiscoveryViewModel) -> Color {
@@ -364,17 +392,17 @@ struct RadarFullScreenView: View {
 
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .font(.system(size: 48, weight: .light))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(AirBridgeDesign.Color.Radar.title)
             }
 
             VStack(spacing: AirBridgeDesign.Spacing.sm) {
                 Text("En attente d'appareils...")
                     .font(AirBridgeDesign.Typography.title3)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(AirBridgeDesign.Color.Radar.title)
 
                 Text("Lance AirBridge sur un autre appareil\nconnecté au même réseau.")
                     .font(AirBridgeDesign.Typography.callout)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(AirBridgeDesign.Color.Radar.subtitle)
                     .multilineTextAlignment(.center)
             }
         }
@@ -414,6 +442,13 @@ struct RadarFullScreenView: View {
 
     // MARK: - Bottom Status
 
+    /// Pied de page : actions de session (envoi / déconnexion).
+    ///
+    /// Les capsules « texte blanc sur accent à 30 % » étaient illisibles en
+    /// thème clair. On passe sur des **contrôles natifs**
+    /// (`.borderedProminent` / `.bordered` + `role: .destructive`) : le
+    /// système fournit les couleurs adaptées au thème et à l'accent choisi
+    /// par l'utilisateur, sur les deux plateformes.
     private func bottomStatusSection(viewModel: DiscoveryViewModel) -> some View {
         HStack(spacing: AirBridgeDesign.Spacing.md) {
             if viewModel.isConnected {
@@ -422,21 +457,15 @@ struct RadarFullScreenView: View {
                     showShareSheet = true
                     Haptics.impact(.light)
                 } label: {
-                    Label("Envoyer des fichiers", systemImage: "square.and.arrow.up")
-                        .font(AirBridgeDesign.Typography.callout)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, AirBridgeDesign.Spacing.md)
-                        .padding(.vertical, AirBridgeDesign.Spacing.sm)
-                        .background(
-                            Capsule()
-                                .fill(Color.accentColor.opacity(0.3))
-                        )
-                        .overlay(
-                            Capsule()
-                                .strokeBorder(Color.accentColor, lineWidth: 1)
-                        )
+                    Label(
+                        "Envoyer des fichiers",
+                        systemImage: "square.and.arrow.up"
+                    )
+                    .font(AirBridgeDesign.Typography.callout)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(.regular)
 
                 // Bouton Déconnecter
                 Button(role: .destructive) {
@@ -445,23 +474,19 @@ struct RadarFullScreenView: View {
                 } label: {
                     Label("Déconnecter", systemImage: "xmark.circle.fill")
                         .font(AirBridgeDesign.Typography.callout)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, AirBridgeDesign.Spacing.md)
-                        .padding(.vertical, AirBridgeDesign.Spacing.sm)
-                        .background(
-                            Capsule()
-                                .fill(Color.red.opacity(0.3))
-                        )
-                        .overlay(
-                            Capsule()
-                                .strokeBorder(Color.red.opacity(0.5), lineWidth: 1)
-                        )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.capsule)
+                .controlSize(.regular)
             }
 
             Spacer()
         }
+        // Barre vibrante : le pied de page reste lisible même quand le
+        // contenu du radar défile/respire derrière lui, en clair comme en
+        // sombre (le matériau suit l'apparence système).
+        .padding(.horizontal, AirBridgeDesign.Spacing.sm)
+        .background(.ultraThinMaterial, ignoresSafeAreaEdges: .bottom)
     }
 
     // MARK: - Device Selection & Pairing
