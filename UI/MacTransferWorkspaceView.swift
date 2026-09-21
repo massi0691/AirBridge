@@ -19,7 +19,7 @@
 #if os(macOS)
 
 import SwiftUI
-import UniformTypeIdentifiers
+internal import UniformTypeIdentifiers
 
 /// Filtres du tableau des transferts, pilotés depuis la sidebar.
 enum MacTransferFilter: String, CaseIterable, Identifiable, Hashable {
