@@ -199,17 +199,56 @@ struct AirBridgeApp: App {
     }
 
     var body: some Scene {
+#if os(macOS)
+        Group {
+            workspaceScene
+            settingsScene
+        }
+#else
         workspaceScene
+#endif
     }
 
 #if os(macOS)
     /// Fenêtre macOS : taille initiale 1280 × 820, librement
-    /// redimensionnable ensuite.
+    /// redimensionnable ensuite. `windowResizability` garantit que le
+    /// contenu minimal (sidebar 220 + détail 600) reste lisible même
+    /// après un redimensionnement agressif, ce qui évitait la fenêtre
+    /// blanche / sidebar écrasée visible sur la capture.
     private var workspaceScene: some Scene {
         WindowGroup {
             rootContent
         }
         .defaultSize(width: 1280, height: 820)
+        .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified)
+        .commands {
+            SidebarCommands()
+        }
+    }
+
+    /// Scène Réglages macOS : permet ⌘ , et le menu
+    /// « AirBridge ▸ Réglages… ». Sans elle, `SettingsView` n'était
+    /// atteignable que depuis la sidebar et l'utilisateur macOS
+    /// habitué à ⌘ , ne trouvait pas les réglages.
+    private var settingsScene: some Scene {
+        Settings {
+            if let coreHolder {
+                SettingsView(
+                    receivedFolderStore: coreHolder.core.receivedFolderStore,
+                    notificationManager: coreHolder.core.notificationManager,
+                    pairingStore: coreHolder.core.pairingStore
+                )
+                .frame(minWidth: 520, minHeight: 460)
+            } else {
+                VStack(spacing: 16) {
+                    ProgressView()
+                    Text("Initialisation…")
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
     }
 #else
     private var workspaceScene: some Scene {
@@ -226,32 +265,35 @@ struct AirBridgeApp: App {
                 rootView(for: coreHolder)
                     .environment(notificationManager)
             } else {
-                Color.clear
-                    .onAppear {
-                        coreHolder = CoreHolder(
-                            notificationManager: notificationManager
-                        )
-
-                        // L'extension de partage (Share Extension iOS,
-                        // Finder Service macOS) a pu copier un lot avant
-                        // notre démarrage (notification Darwin reçue avant
-                        // l'init du Core, ou feuille fermée par le
-                        // système) : purge des fichiers livrés puis
-                        // présentation du lot le plus récent. Aucun envoi
-                        // automatique ici.
-                        sweepPendingShares()
-
+                // Écran de chargement explicite avec taille minimale :
+                // l'ancien `Color.clear` sans frame produisait une
+                // fenêtre vide / blanche au lancement sur macOS,
+                // surtout quand l'initialisation du Core prenait
+                // quelques centaines de ms (Keychain, PairingStore).
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text("AirBridge")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                    Text("Initialisation…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 820, minHeight: 520)
+                .task {
+                    coreHolder = CoreHolder(
+                        notificationManager: notificationManager
+                    )
+                    sweepPendingShares()
 #if os(iOS)
-                        startPendingShareObserver()
+                    startPendingShareObserver()
 #endif
-                    }
+                }
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
-            // Retour au premier plan : le partage a pu être initié
-            // pendant que l'app était inactive (pas d'`onOpenURL`
-            // garanti) ; on survole les lots App Group à chaque
-            // activation.
             if newPhase == .active { sweepPendingShares() }
         }
         .onOpenURL { url in
