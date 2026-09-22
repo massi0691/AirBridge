@@ -109,6 +109,10 @@ struct MacTransferWorkspaceView: View {
     /// Popup de confirmation « Voulez-vous supprimer tout
     /// l'historique ? ».
     @State private var isConfirmingClearHistory = false
+    /// Demande d'envoi rapide (menu barre) en attente du changement de
+    /// filtre : le sélecteur de fichiers n'est monté qu'une fois le
+    /// filtre « Tous » affiché (zone de dépôt visible).
+    @State private var pendingImporterRequest = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -196,6 +200,29 @@ struct MacTransferWorkspaceView: View {
             // Changer de filtre vide la sélection d'historique : elle ne
             // concerne que le tableau « Historique ».
             historySelection.removeAll()
+
+            // Envoi rapide depuis le menu barre : le sélecteur de
+            // fichiers n'est actif qu'une fois la zone de dépôt
+            // montée (filtre « Tous ») — on l'ouvre ici, à
+            // l'installation de ce filtre.
+            if pendingImporterRequest {
+                pendingImporterRequest = false
+                isImporterPresented = true
+            }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: .airbridgeQuickSend
+            )
+        ) { _ in
+            // « Envoyer un fichier… » du menu barre : amène
+            // l'utilisateur sur la zone de dépôt, sélecteur ouvert.
+            if filter == .all {
+                isImporterPresented = true
+            } else {
+                pendingImporterRequest = true
+                filter = .all
+            }
         }
         .task {
             if viewModel == nil {
@@ -422,8 +449,11 @@ struct MacTransferWorkspaceView: View {
     }
 
     private func restartDiscovery() {
-        core.bonjourService.stopDiscovery()
-        core.bonjourService.startDiscovery()
+        // Relance COMPLÈTE (navigateur + écouteur) via le Core :
+        // l'ancien stop/start du seul navigateur ne reprenait pas un
+        // écouteur `.failed` ni ne resynchronisait après un réveil —
+        // cause du « macOS ne détecte plus mon iPhone ».
+        core.forceRestartDiscovery()
     }
 
     private func openLocalNetworkSettings() {

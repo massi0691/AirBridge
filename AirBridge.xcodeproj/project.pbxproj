@@ -11,6 +11,7 @@
 		FCF4F332300A0FD100941C8C /* ShareHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCF4F332300A0FD100941C87 /* ShareHelper.swift */; };
 		FCF5F332300A0FD100941CB0 /* MacOSShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCF5F332300A0FD100941CB2 /* MacOSShareViewController.swift */; };
 		FCF5F332300A0FD100941CB1 /* ShareHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCF4F332300A0FD100941C87 /* ShareHelper.swift */; };
+		FCF5F332300A0FD100941CC0 /* AirBridgeSharedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCF5F332300A0FD100941CC1 /* AirBridgeSharedState.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -46,6 +47,7 @@
 		FCF4F332300A0FD100941C87 /* ShareHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ShareHelper.swift; path = ShareExtension/ShareHelper.swift; sourceTree = "<group>"; };
 		FCF5F332300A0FD100941C9C /* FinderService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = FinderService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		FCF5F332300A0FD100941CB2 /* MacOSShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MacOSShareViewController.swift; path = MacOS/FinderService/MacOSShareViewController.swift; sourceTree = "<group>"; };
+		FCF5F332300A0FD100941CC1 /* AirBridgeSharedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AirBridgeSharedState.swift; path = MacOS/AirBridgeSharedState.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -181,6 +183,7 @@
 				FCF4F332300A0FD100941C86 /* ShareViewController.swift */,
 				FCF4F332300A0FD100941C87 /* ShareHelper.swift */,
 				FCF5F332300A0FD100941CB2 /* MacOSShareViewController.swift */,
+				FCF5F332300A0FD100941CC1 /* AirBridgeSharedState.swift */,
 			);
 			name = "Recovered References";
 			sourceTree = "<group>";
@@ -459,6 +462,7 @@
 			files = (
 				FCF5F332300A0FD100941CB0 /* MacOSShareViewController.swift in Sources */,
 				FCF5F332300A0FD100941CB1 /* ShareHelper.swift in Sources */,
+				FCF5F332300A0FD100941CC0 /* AirBridgeSharedState.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

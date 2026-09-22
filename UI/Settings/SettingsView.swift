@@ -10,6 +10,7 @@ import UserNotifications
 import OSLog
 #if os(macOS)
 import AppKit
+import ServiceManagement
 #endif
 internal import UniformTypeIdentifiers
 
@@ -38,9 +39,22 @@ struct SettingsView: View {
     @State private var isFolderImporterPresented = false
     @State private var pairings: [PairingInfo] = []
 
+#if os(macOS)
+    /// État réel du lancement au démarrage (source : `SMAppService`).
+    @State private var launchAtLogin: Bool = false
+#endif
+
     @Environment(\.scenePhase) private var scenePhase
 
     @AppStorage("notificationsEnabled") private var notificationsEnabled: Bool = true
+
+    /// Connexion automatique des pairs de confiance — lue par
+    /// `AutoConnectPolicy` côté Core (`autoConnectEnabled`).
+    @AppStorage("autoConnectEnabled") private var autoConnectEnabled: Bool = true
+
+    /// Résidence dans la barre des menus macOS — pilotée par le
+    /// `MenuBarExtra` de `AirBridgeApp` (`menuBarEnabled`).
+    @AppStorage("menuBarEnabled") private var menuBarEnabled: Bool = true
 
     var body: some View {
         Form {
@@ -105,6 +119,58 @@ struct SettingsView: View {
                 #endif
             }
 
+            Section("Connexion automatique") {
+                Toggle(
+                    "Reconnecter automatiquement les appareils de confiance",
+                    isOn: $autoConnectEnabled
+                )
+
+                Text(
+                    "Un appareil appairé et marqué de confiance est relié dès sa découverte. Les reprises de transfert interrompus, eux, restent toujours actifs."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                if !autoConnectEnabled {
+                    Text(
+                        "Désactivé : lance manuellement la connexion depuis l'écran Appareils."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+#if os(macOS)
+            Section("Arrière-plan (macOS)") {
+                Toggle(
+                    "Garder AirBridge actif dans la barre des menus",
+                    isOn: $menuBarEnabled
+                )
+
+                Text(
+                    "L'icône reste en haut d'écran même fenêtres fermées : état de connexion, ouverture et envoi rapides à tout moment. L'activité continue (découverte, transferts) est garantie tant que cette option est active."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Toggle(
+                    "Lancer AirBridge au démarrage",
+                    isOn: $launchAtLogin
+                )
+                .onChange(of: launchAtLogin) { _, newValue in
+                    // Seule une VRAIE différence avec le service est
+                    // appliquée : le `refreshLaunchAtLogin()` de
+                    // l'affichage ne doit pas re-déclencher un
+                    // register/unregister.
+                    let currentStatus =
+                        SMAppService.mainApp.status == .enabled
+                    if newValue != currentStatus {
+                        setLaunchAtLogin(newValue)
+                    }
+                }
+            }
+#endif
+
             if let core {
                 DiagnosticsView(core: core)
             }
@@ -131,13 +197,21 @@ struct SettingsView: View {
         .scrollContentBackground(.hidden)
         .background(Color(nsColor: .windowBackgroundColor))
 #endif
-        .onAppear(perform: loadInitialPairings)
+        .onAppear {
+            loadInitialPairings()
+#if os(macOS)
+            refreshLaunchAtLogin()
+#endif
+        }
         .onChange(of: scenePhase) { _, newPhase in
             // Recharge la liste des pairages quand la scène redevient active
             // afin de refléter les nouveaux appairages effectués depuis un
             // autre écran.
             if newPhase == .active {
                 loadInitialPairings()
+#if os(macOS)
+                refreshLaunchAtLogin()
+#endif
             }
         }
         .fileImporter(
@@ -201,6 +275,32 @@ struct SettingsView: View {
     private func loadInitialPairings() {
         pairings = Array(pairingStore.loadAll().values).sorted { $0.lastSeenAt > $1.lastSeenAt }
     }
+
+#if os(macOS)
+    /// Relit l'état réel du service de lancement au démarrage (l'option
+    /// peut avoir changé hors app, ou le binaire peut être en cours de
+    /// développement sans entitlement de signature).
+    private func refreshLaunchAtLogin() {
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+    }
+
+    /// Applique le lancement au démarrage ; sur refus (binaire non
+    /// signé en Debug, par exemple) l'état du Toggle revient au réel.
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            logger.error(
+                "Lancement au démarrage impossible : \(error.localizedDescription, privacy: .public)"
+            )
+            refreshLaunchAtLogin()
+        }
+    }
+#endif
 }
 
 /// Actions possibles sur un appareil appairé.

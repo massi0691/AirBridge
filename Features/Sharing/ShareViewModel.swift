@@ -23,6 +23,22 @@ import Observation
 import SwiftUI
 import OSLog
 
+/// Issue détaillée d'un envoi demandé depuis la vue d'envoi.
+///
+/// `send(to:)` garde sa signature `Bool` (contrat historique des
+/// tests) ; ce module capture la distinction utile à la surface
+/// hôte de la feuille :
+///  - `.sentNow`  : le Core a importé les fichiers → la feuille peut
+///    se fermer (`onSendResult(true)`) ;
+///  - `.scheduled`: envoi programmé, partira à la session sécurisée →
+///    la feuille reste ouverte, le bandeau reflète l'attente ;
+///  - `.refused`  : rien n'a été pris en charge.
+enum ShareSendOutcome: Equatable, Sendable {
+    case sentNow
+    case scheduled
+    case refused
+}
+
 /// Drives the share screen.
 ///
 /// The View never reaches into `core` directly : it only reads the
@@ -35,6 +51,12 @@ import OSLog
 final class ShareViewModel {
 
     let core: AirBridgeCore
+
+    /// Issue du dernier appel à `send(to:)` /
+    /// `sendToLastConnectedDevice()` — lu par la vue pour décider si
+    /// la feuille se ferme (`.sentNow`) ou affiche le bandeau
+    /// d'attente (`.scheduled`).
+    private(set) var lastSendOutcome: ShareSendOutcome = .refused
 
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "Massinissa.AirBridge",
@@ -80,6 +102,20 @@ final class ShareViewModel {
         connectedDevice != nil
     }
 
+    /// Dernier appareil avec lequel une session a existé (même déjà
+    /// fermée) — proposé en un clic depuis la feuille (« Envoyer à… »),
+    /// en écho à l'action équivalente de l'extension Finder.
+    var lastConnectedDevice: Device? {
+        core.lastConnectedDevice
+    }
+
+    /// Nom du destinataire d'un envoi programmé vers un appareil non
+    /// encore connecté. `nil` sinon — piloterait le bandeau
+    /// « Connexion en cours — envoi automatique… » de la vue.
+    var scheduledTargetedSendPeerName: String? {
+        core.scheduledTargetedSendPeerName
+    }
+
     /// Recipients the user can pick from, honouring the
     /// `showAllRecipients` toggle. The connected peer is the only one
     /// that can actually receive a transfer, so we keep it even when
@@ -94,12 +130,12 @@ final class ShareViewModel {
         }
     }
 
-    /// Pre-condition for the send action. The user must have:
-    ///   - picked at least one file ;
-    ///   - be connected to a remote peer.
-    /// Without the second one, calling into the Core would be a no-op
-    /// (it would print a warning and do nothing), which is a worse UX
-    /// than simply disabling the send button with a banner.
+    /// Pre-condition for the SEND BUTTON (« Envoyer » bar) : the files
+    /// must be present and a peer must already be linked — that button
+    /// targets the current session. Selecting a DISCOVERED chip in the
+    /// recipient strip has no such requirement: `send(to:)` connects
+    /// first (auto-connection) and queues the send for when the secure
+    /// session is up.
     var canShare: Bool {
         isConnected && !attachedURLs.isEmpty
     }
@@ -164,40 +200,47 @@ final class ShareViewModel {
     /// security-scoped resources, and the connection-state guard —
     /// we only forward the call.
     ///
-    /// The `recipient` parameter is taken for UI semantics
-    /// (the user explicitly picked a target device) but is not
-    /// forwarded to the Core: the Core's public `importAndRequestItems`
-    /// is single-argument and routes the call to whichever peer is
-    /// currently connected. We refuse the call when the picked
-    /// recipient is not the connected one, so the user never gets a
-    /// silent reroute to a different device.
+    /// The `recipient` parameter decides the route:
+    ///   - the currently connected peer → direct send through
+    ///     `core.importAndRequestItems` (historical path) ;
+    ///   - any other DISCOVERED peer → `core.scheduleTargetedSend` :
+    ///     the Core opens a connection to that peer and queues the send
+    ///     for when the secure session is up (fixes « impossible de
+    ///     connecter un appareil depuis la feuille de partage »).
     ///
-    /// Returns `true` if the Core actually took the request. A `false`
-    /// return means the pre-conditions were not met (no peer, no
-    /// files, or the picked recipient is not the connected peer);
-    /// the View should surface a "connect first" feedback in that
-    /// case.
+    /// Returns `true` if the Core took the request (sent now OR
+    /// scheduled). A `false` means the selection was refused (no files,
+    /// recipient neither connected nor discovered).
     @discardableResult
     func send(to recipient: DiscoveredDevice) -> Bool {
-        guard isConnected else {
-            // The user should never see a send button without a peer
-            // — `canShare` is `false` in that case. We double-check
-            // here as a defensive measure: a peer may disconnect
-            // between the View's render and the tap.
-            logger.warning("Envoi refusé : aucun appareil connecté")
-            return false
-        }
         guard !attachedURLs.isEmpty else {
             logger.warning("Envoi refusé : aucun fichier attaché")
+            lastSendOutcome = .refused
             return false
         }
-        // Reject if the picked recipient is not the connected peer :
-        // the Core only has one outbound channel, and silently
-        // rerouting to a different device would be a worse outcome
-        // than a clear "wrong device" feedback.
-        guard recipient.id == connectedDevice?.id else {
-            logger.warning("Envoi refusé : appareil sélectionné non connecté")
-            return false
+
+        // Destinataire ni connecté ni découvert → refus explicite.
+        // Destinataire découvert mais non connecté → connexion + envoi
+        // programmé (le bandeau de la vue reflète l'état programmé).
+        if recipient.id != connectedDevice?.id {
+            guard discoveredDevices.contains(
+                where: { $0.id == recipient.id }
+            ) else {
+                logger.warning(
+                    "Envoi refusé : appareil sélectionné ni connecté ni découvert"
+                )
+                lastSendOutcome = .refused
+                return false
+            }
+            let scheduled = core.scheduleTargetedSend(
+                urls: attachedURLs,
+                to: recipient.device
+            )
+            if scheduled {
+                attachedURLs.removeAll()
+            }
+            lastSendOutcome = scheduled ? .scheduled : .refused
+            return scheduled
         }
 
         // Log de diagnostic avant l'envoi
@@ -232,7 +275,49 @@ final class ShareViewModel {
         // rien n'est supprimé ici : les fichiers de lot dont l'envoi est
         // en cours ou a échoué restent nécessaires tant que le transfert
         // n'a pas abouti (`PendingShareController.pruneDeliveredBatches`).
+        lastSendOutcome = accepted ? .sentNow : .refused
         return accepted
+    }
+
+    /// Envoi en un clic vers le dernier appareil connecté — action
+    /// proposée par la feuille de partage (en écho au bouton
+    /// « Envoyer à <X> » de l'extension Finder), valable même si ce
+    /// pair n'est plus découvert à l'instant : le Core attendra sa
+    /// redécouverte (dans la limite de son délai).
+    ///
+    /// - Returns: `true` si l'envoi est parti ou programmé.
+    @discardableResult
+    func sendToLastConnectedDevice() -> Bool {
+        guard let last = lastConnectedDevice else {
+            lastSendOutcome = .refused
+            return false
+        }
+        guard !attachedURLs.isEmpty else {
+            logger.warning("Envoi refusé : aucun fichier attaché")
+            lastSendOutcome = .refused
+            return false
+        }
+        let accepted = core.scheduleTargetedSend(
+            urls: attachedURLs,
+            to: last
+        )
+        if accepted {
+            attachedURLs.removeAll()
+        }
+        lastSendOutcome = accepted ? .scheduled : .refused
+        return accepted
+    }
+
+    /// Annule l'envoi programmé (bandeau « envoi automatique »).
+    func cancelScheduledSend() {
+        core.cancelScheduledTargetedSend()
+    }
+
+    /// Relance complètement la découverte Bonjour (bouton « Rechercher »
+    /// de la feuille quand aucun appareil n'apparaît, ou après un
+    /// réveil macOS où la liste restait vide).
+    func refreshDiscovery() {
+        core.forceRestartDiscovery()
     }
 
     // MARK: - Helpers

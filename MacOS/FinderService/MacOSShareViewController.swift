@@ -70,12 +70,24 @@ final class MacOSShareViewController: NSViewController {
     /// « Terminer » = complétion de succès, pas d'annulation.
     private var isReady = false
 
+    /// Identifiant du lot en cours (requis pour la directive d'envoi
+    /// ciblé).
+    private var currentBatchID: String?
+
+    /// Dernier appareil connecté lu dans l'App Group — action
+    /// principale « Envoyer à <X> » quand connu.
+    private var targetPeer: AirBridgeSharedPeer?
+
     // MARK: - UI (AppKit pur)
 
     private let spinner = NSProgressIndicator()
     private let statusLabel = NSTextField()
     private let doneButton = NSButton()
     private let cancelButton = NSButton()
+
+    /// Action secondaire (état prêt) : envoi direct vers le dernier
+    /// appareil connecté, sans passer par la sélection dans l'app.
+    private let sendButton = NSButton()
 
     override func loadView() {
         let container = NSView(
@@ -111,7 +123,23 @@ final class MacOSShareViewController: NSViewController {
         cancelButton.action = #selector(cancelTapped)
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [spinner, statusLabel, doneButton, cancelButton])
+        // « Envoyer à <dernier appareil> » : principal côté état prêt,
+        // caché tant que l'App Group ne fournit pas de dernier pair.
+        sendButton.bezelStyle = .rounded
+        sendButton.keyEquivalent = "\r"
+        sendButton.target = self
+        sendButton.action = #selector(sendToTargetTapped)
+        sendButton.isHidden = true
+        sendButton.translatesAutoresizingMaskIntoConstraints = false
+        sendButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let stack = NSStackView(views: [
+            spinner,
+            statusLabel,
+            sendButton,
+            doneButton,
+            cancelButton
+        ])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 14
@@ -161,7 +189,14 @@ final class MacOSShareViewController: NSViewController {
         // Première apparition : le bouton peut être flottant entre deux
         // partages du même cycle de vie — on réinitialise l'état.
         doneButton.isHidden = true
+        sendButton.isHidden = true
+        sendButton.title = "Envoyer à…"
+        doneButton.title = "Terminer"
+        // Retour = bouton principal : c'est « Terminer » tant que
+        // l'action d'envoi direct n'est pas affichée (cf. état prêt).
+        doneButton.keyEquivalent = "\r"
         cancelButton.title = "Annuler"
+        targetPeer = nil
         spinner.startAnimation(nil)
 
         handoffTask = Task { @MainActor in
@@ -178,6 +213,7 @@ final class MacOSShareViewController: NSViewController {
     @MainActor
     private func performHandoff(context: NSExtensionContext) async {
         let batchID = UUID().uuidString
+        currentBatchID = batchID
         print("🔁 Finder Share — début du handoff, lot \(batchID)")
 
         guard let containerURL = FileManager.default
@@ -339,11 +375,33 @@ final class MacOSShareViewController: NSViewController {
         isReady = true
         spinner.stopAnimation(nil)
         statusLabel.textColor = .labelColor
-        statusLabel.stringValue = count == 1
-            ? "1 fichier prêt — ouverture d'AirBridge…"
-            : "\(count) fichiers prêts — ouverture d'AirBridge…"
         doneButton.isHidden = false
         cancelButton.title = "Fermer"
+
+        // Envoi direct vers le dernier appareil connecté (état partagé
+        // publié par l'app principale à chaque session) : action
+        // principale de la feuille quand connue — c'est l'affordance
+        // demandée « envoyer depuis le menu de partage vers le dernier
+        // appareil connecté ».
+        targetPeer = AirBridgeSharedStateStore.read()?.lastPeer
+        if let targetPeer {
+            statusLabel.stringValue = count == 1
+                ? "1 fichier prêt."
+                : "\(count) fichiers prêts."
+            sendButton.title = "Envoyer à \(targetPeer.name)"
+            sendButton.isHidden = false
+            doneButton.title = "Choisir dans AirBridge"
+            // Un seul bouton peut répondre à Retour : c'est l'envoi
+            // direct tant qu'il est visible.
+            doneButton.keyEquivalent = ""
+        } else {
+            statusLabel.stringValue = count == 1
+                ? "1 fichier prêt — ouverture d'AirBridge…"
+                : "\(count) fichiers prêts — ouverture d'AirBridge…"
+            sendButton.isHidden = true
+            doneButton.title = "Terminer"
+            doneButton.keyEquivalent = "\r"
+        }
     }
 
     private func showErrorState(_ message: String) {
@@ -360,6 +418,43 @@ final class MacOSShareViewController: NSViewController {
     /// « Terminer » (état prêt) : le lot est stationné, on termine en
     /// succès.
     @objc private func doneTapped() {
+        finishWithSuccess()
+    }
+
+    /// « Envoyer à <dernier appareil> » : écrit la directive d'envoi
+    /// ciblé dans l'App Group puis rouvre l'app avec le couple
+    /// `batch` + `send`. L'application PRINCIPALE reste la seule à
+    /// décider : elle ne consomme la directive que si sa session
+    /// réelle correspond au destinataire (auto-connexion trusted si
+    /// besoin), sinon la feuille d'envoi classique prend le relais.
+    @objc private func sendToTargetTapped() {
+        guard let peer = targetPeer, let batchID = currentBatchID else {
+            finishWithSuccess()
+            return
+        }
+
+        let directive = AirBridgeSendDirective(
+            batchID: batchID,
+            targetPeerID: peer.id,
+            targetPeerName: peer.name,
+            createdAt: Date()
+        )
+        let written = AirBridgeSendDirectiveStore.write(directive)
+        Self.diag.info(
+            "[DIAG-TEMP] directive d'envoi ciblé écrite : \(written ? "ok" : "échec", privacy: .public) → \(peer.name, privacy: .public)"
+        )
+
+        if written,
+           let appURL = AirBridgeURLScheme.makeReceiveURL(
+               batchID: batchID,
+               sendTo: peer.id
+           ) {
+            let opened = NSWorkspace.shared.open(appURL)
+            Self.diag.info(
+                "[DIAG-TEMP] ouverture avec envoi ciblé : \(opened ? "ok" : "refusée", privacy: .public)"
+            )
+        }
+
         finishWithSuccess()
     }
 

@@ -20,16 +20,54 @@ import AppKit
 /// Le partage depuis le Finder passe désormais par l'extension
 /// FinderService (com.apple.share-services) : l'ancien canal Services
 /// (NSServices legacy + `servicesProvider`) a été retiré.
+///
+/// Deux responsabilités critiques pour la résidence en arrière-plan :
+///  1. acheminer les URLs à l'app MÊME sans fenêtre ouverte (tampon
+///     jusqu'à l'enregistrement du consommateur) ;
+///  2. garantir que la fermeture de la dernière fenêtre ne tue jamais
+///     l'app (barre des menus + découverte restent actives).
 class MainAppDelegate: NSObject, NSApplicationDelegate {
+
+    /// URLs reçues avant qu'`AirBridgeApp` n'ait enregistré son
+    /// consommateur (cold launch : `application(_:open:)` part souvent
+    /// avant le premier rendu — sans tampon, le lot était perdu).
+    private var undeliveredURLs: [URL] = []
+
+    /// Consommateur courant des URLs partagées.
+    private var urlHandler: (([URL]) -> Void)?
+
+    /// Enregistre le consommateur et rejoue immédiatement le tampon.
+    /// Idempotent : un nouvel enregistrement remplace l'ancien.
+    func registerURLHandler(_ handler: @escaping ([URL]) -> Void) {
+        urlHandler = handler
+        guard !undeliveredURLs.isEmpty else { return }
+        let buffered = undeliveredURLs
+        undeliveredURLs = []
+        handler(buffered)
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
-        // Handle URLs when the app is launched via URL scheme
-        for url in urls {
-            NotificationCenter.default.post(
-                name: .airbridgeFilesReceived,
-                object: nil,
-                userInfo: ["url": url]
-            )
+        guard !urls.isEmpty else { return }
+
+        // Traitement par LOTS : l'ancien chemin postait UNE notification
+        // par URL ; le présentateur ne montrait alors que le premier lot
+        // (signature de dédup différente, puis `item != nil` refusait la
+        // suite) — les fichiers additionnels d'un « Ouvrir avec »
+        // multiple semblaient donc perdus.
+        if let urlHandler {
+            urlHandler(urls)
+        } else {
+            undeliveredURLs.append(contentsOf: urls)
         }
+    }
+
+    /// Résidence en arrière-plan : l'app reste active après fermeture
+    /// de la dernière fenêtre (barre des menus, découverte Bonjour,
+    /// transferts en cours).
+    func applicationShouldTerminateAfterLastWindowClosed(
+        _ application: NSApplication
+    ) -> Bool {
+        false
     }
 }
 #endif
@@ -98,6 +136,15 @@ struct AirBridgeApp: App {
 
 #if os(macOS)
     @NSApplicationDelegateAdaptor(MainAppDelegate.self) private var appDelegate
+
+    /// Résidence dans la barre des menus (Réglages ▸ « Garder AirBridge
+    /// actif en arrière-plan »). `true` par défaut : l'app reste
+    /// disponible en haut d'écran pour envoyer à tout moment.
+    @AppStorage("menuBarEnabled") private var menuBarEnabled: Bool = true
+
+    /// Assertion d'activité anti-App Nap, tenue tant que la résidence
+    /// en barre des menus est active (cf. `MacBackgroundActivity`).
+    @State private var backgroundActivity = MacBackgroundActivity()
 #endif
 
     // Use a wrapper class to allow lazy initialization
@@ -203,6 +250,7 @@ struct AirBridgeApp: App {
         Group {
             workspaceScene
             settingsScene
+            menuBarScene
         }
 #else
         workspaceScene
@@ -215,8 +263,12 @@ struct AirBridgeApp: App {
     /// contenu minimal (sidebar 220 + détail 600) reste lisible même
     /// après un redimensionnement agressif, ce qui évitait la fenêtre
     /// blanche / sidebar écrasée visible sur la capture.
+    ///
+    /// `id: "workspace"` permet au menu de la barre des menus de
+    /// recréer la fenêtre via `openWindow(id:)` quand toutes les
+    /// fenêtres sont fermées (l'app reste résidente).
     private var workspaceScene: some Scene {
-        WindowGroup {
+        WindowGroup(id: "workspace") {
             rootContent
         }
         .defaultSize(width: 1280, height: 820)
@@ -225,6 +277,21 @@ struct AirBridgeApp: App {
         .commands {
             SidebarCommands()
         }
+    }
+
+    /// Scène barre des menus (résidence arrière-plan) : l'icône reste
+    /// visible en haut d'écran même fenêtres fermées, avec l'état de
+    /// connexion, l'ouverture de la fenêtre, l'envoi rapide et la
+    /// sortie. Désactivable depuis Réglages (`menuBarEnabled`).
+    private var menuBarScene: some Scene {
+        MenuBarExtra(
+            "AirBridge",
+            systemImage: "arrow.triangle.2.circlepath",
+            isInserted: $menuBarEnabled
+        ) {
+            MacMenuBarContentView(coreProvider: { coreHolder?.core })
+        }
+        .menuBarExtraStyle(.menu)
     }
 
     /// Scène Réglages macOS : permet ⌘ , et le menu
@@ -287,6 +354,20 @@ struct AirBridgeApp: App {
                     coreHolder = CoreHolder(
                         notificationManager: notificationManager
                     )
+#if os(macOS)
+                    // Consommateur des URLs partagées : enregistré ICI
+                    // (et plus dans une vue fenêtrée) — le tampon de
+                    // l'AppDelegate rejoue les URLs arrivées au lancement
+                    // avant le premier rendu, et reste actif même si
+                    // toutes les fenêtres sont fermées plus tard.
+                    installSharedURLHandler()
+                    // Résidence : assertion d'activité selon le réglage.
+                    if menuBarEnabled { backgroundActivity.begin() }
+#endif
+                    // Envoi ciblé programmé (« Envoyer à <X> » de
+                    // l'extension) : ferme la feuille de lot quand le
+                    // Core a réellement importé les fichiers.
+                    installTargetedSendObserver()
                     sweepPendingShares()
 #if os(iOS)
                     startPendingShareObserver()
@@ -297,6 +378,24 @@ struct AirBridgeApp: App {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active { sweepPendingShares() }
         }
+#if os(macOS)
+        .onChange(of: menuBarEnabled) { _, enabled in
+            if enabled {
+                backgroundActivity.begin()
+            } else {
+                backgroundActivity.end()
+            }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: .airbridgeShowWorkspace
+            )
+        ) { _ in
+            // Menu « Ouvrir AirBridge » : révèle la fenêtre si elle a
+            // été fermée (la scène `workspace` se recrée via l'id).
+            sweepPendingShares()
+        }
+#endif
         .onOpenURL { url in
             handleIncomingURL(url)
         }
@@ -362,12 +461,40 @@ struct AirBridgeApp: App {
                 return
             }
 
-            NotificationCenter.default.post(
-                name: .airbridgeFilesReceived,
-                object: nil,
-                userInfo: ["urls": urls]
-            )
+            // Import DIRECT (plus de passage par une notification vue) :
+            // indispensable en résidence arrière-plan, où aucune scène
+            // fenêtrée n'écoute peut-être plus le NotificationCenter.
+            importSharedURLs(urls)
             print("📩 Fichiers reçus via lot App Group : \(urls.map { $0.lastPathComponent })")
+
+            // Envoi ciblé demandé depuis l'extension Finder
+            // (`&send=<peerID>` + directive dans l'App Group).
+            // La directive n'est consommée qu'une fois et seulement si
+            // son identifiant correspond au paramètre d'URL — l'app
+            // reste seule juge de la session réelle (auto-connexion
+            // trusted le cas échéant).
+            if let sendParam = components.queryItems?
+                .first(where: { $0.name == "send" })?.value,
+               let requestedPeerID = UUID(uuidString: sendParam),
+               let directive = AirBridgeSendDirectiveStore.consume(
+                   batchID: batchID
+               ),
+               directive.targetPeerID == requestedPeerID,
+               let core = coreHolder?.core {
+                let last = core.lastConnectedDevice
+                let peer = Device(
+                    id: directive.targetPeerID,
+                    name: directive.targetPeerName,
+                    model: last?.id == directive.targetPeerID
+                        ? (last?.model ?? "Appareil")
+                        : "Appareil"
+                )
+                // Présentation d'abord (la feuille montre l'attente
+                // d'éventuelle connexion), programmation ensuite : si la
+                // session sécurisée existe déjà, l'envoi part dans la
+                // foulée et `onTargetedSendFinished` referme la feuille.
+                core.scheduleTargetedSend(urls: urls, to: peer)
+            }
             return
         }
 
@@ -383,17 +510,45 @@ struct AirBridgeApp: App {
         let urlStrings = decoded.split(separator: "|").map(String.init)
         let urls = urlStrings.compactMap { URL(string: $0) }
 
-        // Post notification for the main app to handle
-        // In practice, the app must be running and connected for this to work.
-        // Otherwise, store the URLs and process them once connected.
-        NotificationCenter.default.post(
-            name: .airbridgeFilesReceived,
-            object: nil,
-            userInfo: ["urls": urls]
-        )
+        // Import direct — cf. la branche `batch` ci-dessus (résidence
+        // arrière-plan sans scène fenêtrée).
+        importSharedURLs(urls)
 
         print("📩 Fichiers reçus via URL scheme : \(urls.map { $0.lastPathComponent })")
     }
+
+    /// Quand un envoi ciblé programmé (« Envoyer à <X> ») est soldé :
+    ///  - succès → le Core a importé le lot → la feuille (si ouverte)
+    ///    se ferme comme pour un envoi manuel ;
+    ///  - échec  → la feuille reste, l'utilisateur peut réessayer.
+    private func installTargetedSendObserver() {
+        let controller = pendingShareController
+        coreHolder?.core.onTargetedSendFinished = { _, success in
+            guard success else { return }
+            controller.finish(imported: true)
+        }
+    }
+
+#if os(macOS)
+    /// Enregistre l'AppDelegate comme consommateur des URLs partagées
+    /// (tampon de lancement rejoué ici).
+    ///
+    /// Les `file://` d'un « Ouvrir avec AirBridge » multiple sont
+    /// importés en UN SEUL lot : l'ancien traitement URL par URL ne
+    /// présentait que le premier fichier (le second trouvait la
+    /// feuille déjà occupée) — symptôme « fichiers perdus ».
+    private func installSharedURLHandler() {
+        appDelegate.registerURLHandler { urls in
+            let fileURLs = urls.filter(\.isFileURL)
+            if !fileURLs.isEmpty {
+                self.importSharedURLs(fileURLs)
+            }
+            for url in urls where !url.isFileURL {
+                self.handleIncomingURL(url)
+            }
+        }
+    }
+#endif
 
     /// Résout un lot écrit par le Share Extension iOS dans le conteneur
     /// App Group (`PendingShares/<batchID>/`) en liste d'URLs lisibles
