@@ -412,6 +412,17 @@ final class TransferViewModel {
         core.transferHistoryStore.removeEntry(id: entryID)
     }
 
+    /// Removes several history entries at once (multi-selection).
+    ///
+    /// Le store reste le système d'enregistrement : chaque entrée est
+    /// retirée une par une (le store plafonne à 100 entrées, le coût
+    /// est négligeable) pour ne pas ajouter de surface d'API.
+    func removeFromHistory(entryIDs: Set<UUID>) {
+        for entryID in entryIDs {
+            core.transferHistoryStore.removeEntry(id: entryID)
+        }
+    }
+
     /// Clears the whole history.
     func clearHistory() {
         core.transferHistoryStore.clearAll()

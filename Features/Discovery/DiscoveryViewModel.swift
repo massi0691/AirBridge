@@ -54,11 +54,18 @@ final class DiscoveryViewModel {
 
     // MARK: - Write
 
+    /// Connexion manuelle : passe par le Core, qui lève au passage la
+    /// suspension de connexion automatique vers ce pair (une reconnexion
+    /// manuelle après une déconnexion volontaire rétablit l'automatique).
     func connect(to device: DiscoveredDevice) {
-        core.connectionManager.connect(to: device)
+        core.connect(to: device)
     }
 
+    /// Déconnexion manuelle : passe par le Core, qui suspend la connexion
+    /// automatique vers ce pair — sinon le prochain événement Bonjour
+    /// reconnecterait immédiatement l'appareil que l'utilisateur vient de
+    /// déconnecter.
     func disconnect() {
-        core.connectionManager.disconnect()
+        core.disconnectFromPeer()
     }
 }

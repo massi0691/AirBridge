@@ -39,6 +39,15 @@ struct TransferView: View {
     @State private var pendingCancellation: PendingCancellation?
     @State private var isConfirmingClear = false
 
+    // MARK: - Sélection multiple (onglet « Terminés »)
+
+    /// Mode sélection : les lignes de l'historique affichent une case à
+    /// cocher et le tap bascule la sélection au lieu d'ouvrir la feuille
+    /// d'actions.
+    @State private var isSelectingHistory = false
+    /// Identifiants des entrées cochées.
+    @State private var selectedHistoryIDs: Set<UUID> = []
+
     // MARK: - Présentation feuille de preview
 
     /// Identifiant de l'entrée dont on veut afficher la preview.
@@ -76,20 +85,31 @@ struct TransferView: View {
             }
         }
         .navigationTitle("Transferts")
-#if os(iOS)
         .toolbar {
             if selectedTab == .completed {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(role: .destructive) {
-                        isConfirmingClear = true
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .accessibilityLabel("Vider l’historique")
+#if os(iOS)
+                ToolbarItem(placement: .topBarLeading) {
+                    historySelectionToggleButton
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    clearHistoryButton
+                }
+#else
+                ToolbarItem(placement: .primaryAction) {
+                    historySelectionToggleButton
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    clearHistoryButton
+                }
+#endif
             }
         }
-#endif
+        .onChange(of: selectedTab) { _, _ in
+            // Quitter l'onglet « Terminés » referme le mode sélection :
+            // une sélection invisible ne doit pas survivre à un aller-retour.
+            isSelectingHistory = false
+            selectedHistoryIDs.removeAll()
+        }
         .alert(
             "Annuler ce transfert ?",
             isPresented: cancellationBinding,
@@ -105,16 +125,18 @@ struct TransferView: View {
         } message: { _ in
             Text("Le fichier en cours d’envoi ne sera pas terminé.")
         }
-        .confirmationDialog(
-            "Vider l’historique ?",
+        .alert(
+            "Voulez-vous supprimer tout l’historique ?",
             isPresented: $isConfirmingClear
         ) {
-            Button("Vider", role: .destructive) {
+            Button("Supprimer", role: .destructive) {
                 viewModel?.clearHistory()
+                selectedHistoryIDs.removeAll()
+                isSelectingHistory = false
             }
             Button("Annuler", role: .cancel) { }
         } message: {
-            Text("Cette action est irréversible.")
+            Text("Les \(viewModel?.history.count ?? 0) entrée(s) seront définitivement retirées de la liste. Cette action est irréversible.")
         }
         .sheet(
             item: $previewPresentation,
@@ -257,6 +279,38 @@ struct TransferView: View {
 #endif
     }
 
+    // MARK: - Toolbar (onglet « Terminés »)
+
+    /// Bascule le mode sélection multiple de l'historique.
+    private var historySelectionToggleButton: some View {
+        Button {
+            toggleHistorySelectionMode()
+        } label: {
+            Image(
+                systemName: isSelectingHistory
+                    ? "xmark.circle"
+                    : "checkmark.circle"
+            )
+        }
+        .accessibilityLabel(
+            isSelectingHistory
+                ? "Quitter la sélection"
+                : "Sélectionner plusieurs entrées"
+        )
+        .disabled(viewModel?.history.isEmpty ?? true)
+    }
+
+    /// Ouvre la popup « Voulez-vous supprimer tout l'historique ? ».
+    private var clearHistoryButton: some View {
+        Button(role: .destructive) {
+            isConfirmingClear = true
+        } label: {
+            Image(systemName: "trash")
+        }
+        .accessibilityLabel("Vider l’historique")
+        .disabled(viewModel?.history.isEmpty ?? true)
+    }
+
     // MARK: - Content
 
     @ViewBuilder
@@ -371,24 +425,129 @@ struct TransferView: View {
                 symbol: "clock.arrow.circlepath"
             )
         } else {
-            ScrollView {
-                LazyVStack(
-                    spacing: AirBridgeDesign.Spacing.sm
-                ) {
-                    ForEach(entries) { model in
-                        historyRow(
-                            model: model,
-                            onRemove: {
-                                viewModel.removeFromHistory(
-                                    entryID: model.id
-                                )
-                            }
-                        )
-                    }
+            VStack(spacing: 0) {
+                // En-tête de sélection : « Tout sélectionner » + compteur.
+                if isSelectingHistory {
+                    historySelectionHeader(entries: entries)
                 }
-                .padding(AirBridgeDesign.Spacing.md)
+                ScrollView {
+                    LazyVStack(
+                        spacing: AirBridgeDesign.Spacing.sm
+                    ) {
+                        ForEach(entries) { model in
+                            historyRow(
+                                model: model,
+                                onRemove: {
+                                    viewModel.removeFromHistory(
+                                        entryID: model.id
+                                    )
+                                    // L'entrée supprimée individuellement
+                                    // ne doit pas rester dans la sélection.
+                                    selectedHistoryIDs.remove(model.id)
+                                }
+                            )
+                        }
+                    }
+                    .padding(AirBridgeDesign.Spacing.md)
+                }
+                // Barre d'action : suppression groupée des entrées cochées.
+                if isSelectingHistory {
+                    historySelectionActionBar
+                }
             }
         }
+    }
+
+    // MARK: - Sélection multiple (historique)
+
+    /// En-tête affiché au-dessus de la liste en mode sélection :
+    /// « Tout sélectionner / Tout désélectionner » + compteur.
+    @ViewBuilder
+    private func historySelectionHeader(
+        entries: [TransferUIModel]
+    ) -> some View {
+        HStack {
+            Button {
+                toggleSelectAll(entries: entries)
+            } label: {
+                Text(
+                    allHistorySelected(entries: entries)
+                        ? "Tout désélectionner"
+                        : "Tout sélectionner"
+                )
+                .font(AirBridgeDesign.Typography.subheadline)
+            }
+            Spacer()
+            Text("\(selectedHistoryIDs.count) sélectionné(s)")
+                .font(AirBridgeDesign.Typography.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, AirBridgeDesign.Spacing.lg)
+        .padding(.vertical, AirBridgeDesign.Spacing.xs)
+        .background(.bar)
+    }
+
+    /// Barre d'action en bas de l'écran en mode sélection.
+    private var historySelectionActionBar: some View {
+        HStack {
+            Spacer()
+            Button(role: .destructive) {
+                deleteSelectedHistory()
+            } label: {
+                Label(
+                    selectedHistoryIDs.isEmpty
+                        ? "Supprimer"
+                        : "Supprimer (\(selectedHistoryIDs.count))",
+                    systemImage: "trash"
+                )
+                .frame(minWidth: 160)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(selectedHistoryIDs.isEmpty)
+            Spacer()
+        }
+        .padding(AirBridgeDesign.Spacing.md)
+        .background(.bar)
+    }
+
+    private func toggleHistorySelectionMode() {
+        isSelectingHistory.toggle()
+        if !isSelectingHistory {
+            selectedHistoryIDs.removeAll()
+        }
+        Haptics.selection()
+    }
+
+    private func toggleSelectAll(entries: [TransferUIModel]) {
+        if allHistorySelected(entries: entries) {
+            selectedHistoryIDs.removeAll()
+        } else {
+            selectedHistoryIDs = Set(entries.map(\.id))
+        }
+        Haptics.selection()
+    }
+
+    private func allHistorySelected(entries: [TransferUIModel]) -> Bool {
+        !entries.isEmpty
+            && Set(entries.map(\.id)) == selectedHistoryIDs
+    }
+
+    private func toggleSelection(for entryID: UUID) {
+        if selectedHistoryIDs.contains(entryID) {
+            selectedHistoryIDs.remove(entryID)
+        } else {
+            selectedHistoryIDs.insert(entryID)
+        }
+        Haptics.selection()
+    }
+
+    /// Supprime les entrées cochées et quitte le mode sélection.
+    private func deleteSelectedHistory() {
+        guard let viewModel, !selectedHistoryIDs.isEmpty else { return }
+        viewModel.removeFromHistory(entryIDs: selectedHistoryIDs)
+        selectedHistoryIDs.removeAll()
+        isSelectingHistory = false
+        Haptics.warning()
     }
 
     // MARK: - Subviews
@@ -418,6 +577,21 @@ struct TransferView: View {
         onRemove: @escaping () -> Void
     ) -> some View {
         HStack(spacing: AirBridgeDesign.Spacing.md) {
+            // Case à cocher du mode sélection multiple.
+            if isSelectingHistory {
+                Image(
+                    systemName: selectedHistoryIDs.contains(model.id)
+                        ? "checkmark.circle.fill"
+                        : "circle"
+                )
+                .font(.system(size: 22, weight: .regular))
+                .foregroundStyle(
+                    selectedHistoryIDs.contains(model.id)
+                        ? AirBridgeDesign.Color.accent
+                        : .secondary
+                )
+                .accessibilityHidden(true)
+            }
             ZStack {
                 RoundedRectangle(
                     cornerRadius: AirBridgeDesign.Radius.medium
@@ -500,10 +674,16 @@ struct TransferView: View {
         // de la liste" pour nettoyer l'historique.
         .contentShape(Rectangle())
         .onTapGesture {
-            handleTap(
-                entryID: model.id,
-                fileName: model.fileName
-            )
+            // En mode sélection, le tap bascule la case à cocher au lieu
+            // d'ouvrir la feuille d'actions.
+            if isSelectingHistory {
+                toggleSelection(for: model.id)
+            } else {
+                handleTap(
+                    entryID: model.id,
+                    fileName: model.fileName
+                )
+            }
         }
 #if os(iOS)
         // Swipe iOS : "Dossier" + "Supprimer". `allowsFullSwipe:
