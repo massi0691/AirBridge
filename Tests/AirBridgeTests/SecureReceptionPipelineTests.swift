@@ -118,7 +118,7 @@ final class SecureReceptionPipelineTests: XCTestCase {
 
         // Signe avec la clé privée du pair
         let bytesToSign = Data("transferRequest".utf8) // dummy — la signature est calculée sur canonicalBytes
-        let canonical = try canonicalBytesForSigning(message)
+        let canonical = MessageAuthenticator.canonicalBytes(for: message)
         let signature = try peerPrivateKey.signature(for: canonical).rawRepresentation
 
         let signed = AirBridgeMessage(
@@ -152,7 +152,7 @@ final class SecureReceptionPipelineTests: XCTestCase {
             sender: localDevice,
             payload: Data("payload".utf8)
         )
-        let canonical = try canonicalBytesForSigning(message)
+        let canonical = MessageAuthenticator.canonicalBytes(for: message)
         let signature = try peerPrivateKey.signature(for: canonical).rawRepresentation
 
         let signed = AirBridgeMessage(
@@ -205,7 +205,7 @@ final class SecureReceptionPipelineTests: XCTestCase {
             sender: localDevice,
             payload: nil
         )
-        let canonical = try canonicalBytesForSigning(message)
+        let canonical = MessageAuthenticator.canonicalBytes(for: message)
         let signature = try peerPrivateKey.signature(for: canonical).rawRepresentation
 
         let signed = AirBridgeMessage(
@@ -264,7 +264,7 @@ final class SecureReceptionPipelineTests: XCTestCase {
             sender: localDevice,
             payload: Data("binary".utf8)
         )
-        let canonical = try canonicalBytesForSigning(message)
+        let canonical = MessageAuthenticator.canonicalBytes(for: message)
         let signature = try peerPrivateKey.signature(for: canonical).rawRepresentation
 
         let signed = AirBridgeMessage(
@@ -304,7 +304,7 @@ final class SecureReceptionPipelineTests: XCTestCase {
             sender: localDevice,
             payload: Data("payload".utf8)
         )
-        let canonical = try canonicalBytesForSigning(message)
+        let canonical = MessageAuthenticator.canonicalBytes(for: message)
         let badSignature = try peerPrivateKey.signature(for: canonical).rawRepresentation
 
         let badSigned = AirBridgeMessage(
@@ -370,28 +370,5 @@ final class SecureReceptionPipelineTests: XCTestCase {
             "Un message sans signature n'a pas dû empoisonner le store : " +
             "le messageID doit encore être disponible"
         )
-    }
-
-    // MARK: - Helpers
-
-    /// Reconstruit les octets canoniques signés par `MessageAuthenticator`
-    /// (les mêmes que ceux produits par `MessageAuthenticator.canonicalBytes`).
-    /// Répliqué ici pour permettre la signature de test avec une clé
-    /// privée tierce (la méthode `sign(_:)` de `MessageAuthenticator`
-    /// utilise la clé locale du Keychain).
-    private func canonicalBytesForSigning(_ message: AirBridgeMessage) throws -> Data {
-        struct SignedFields: Encodable {
-            let type: String
-            let messageID: String
-            let payload: String?
-        }
-        let fields = SignedFields(
-            type: message.type.rawValue,
-            messageID: message.messageID.uuidString,
-            payload: message.payload?.base64EncodedString()
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(fields)
     }
 }

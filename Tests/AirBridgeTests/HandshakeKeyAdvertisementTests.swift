@@ -158,8 +158,11 @@ final class HandshakeKeyAdvertisementTests: XCTestCase {
             payload: nil
         )
 
-        // Le peer signe son hello avec sa clé long-terme.
-        let canonical = try canonicalBytesForSigning(message)
+        // Le peer signe son hello avec sa clé long-terme. On utilise
+        // la fonction de production `canonicalBytes(for:)` plutôt qu'une
+        // réplique : signer et vérifier doivent porter sur les mêmes
+        // octets.
+        let canonical = MessageAuthenticator.canonicalBytes(for: message)
         let signature = try peerPrivateKey.signature(for: canonical)
             .rawRepresentation
 
@@ -230,7 +233,7 @@ final class HandshakeKeyAdvertisementTests: XCTestCase {
         )
 
         // Le peer signe le keyExchange avec sa clé **long-terme**.
-        let canonical = try canonicalBytesForSigning(message)
+        let canonical = MessageAuthenticator.canonicalBytes(for: message)
         let signature = try peerPrivateKey.signature(for: canonical)
             .rawRepresentation
 
@@ -321,28 +324,5 @@ final class HandshakeKeyAdvertisementTests: XCTestCase {
             "Un hello legacy non signé sans clé annoncée doit être " +
             "rejeté (pas de crash)"
         )
-    }
-
-    // MARK: - Helper
-
-    /// Réplique les octets canoniques produits par
-    /// `MessageAuthenticator.canonicalBytes(for:)`. Répliqué ici pour
-    /// permettre la signature de test avec une clé privée tierce.
-    private func canonicalBytesForSigning(
-        _ message: AirBridgeMessage
-    ) throws -> Data {
-        struct SignedFields: Encodable {
-            let type: String
-            let messageID: String
-            let payload: String?
-        }
-        let fields = SignedFields(
-            type: message.type.rawValue,
-            messageID: message.messageID.uuidString,
-            payload: message.payload?.base64EncodedString()
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(fields)
     }
 }

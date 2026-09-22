@@ -22,6 +22,16 @@ struct FileHasher {
         }
 
         stream.open()
+
+        // Un fichier absent ou illisible positionne `streamError` dès
+        // l'ouverture, MAIS laisse `hasBytesAvailable` à faux : sans cette
+        // vérification, la boucle ci-dessous serait sautée et l'empreinte
+        // renvoyée serait celle du vide — un fichier manquant serait
+        // silencieusement confondu avec un fichier vide.
+        if let streamError = stream.streamError {
+            throw streamError
+        }
+
         defer {
             stream.close()
         }

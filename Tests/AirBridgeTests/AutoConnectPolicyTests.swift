@@ -94,7 +94,7 @@ final class AutoConnectPolicyTests: XCTestCase {
 
     func testSkipsBlockedPeerEvenWithPendingResume() {
         let decision = evaluate(
-            baseInputs(isTrusted: false, isBlocked: true, hasPendingResume: true)
+            baseInputs(hasPendingResume: true, isTrusted: false, isBlocked: true)
         )
         XCTAssertEqual(
             decision,
@@ -128,7 +128,7 @@ final class AutoConnectPolicyTests: XCTestCase {
 
     func testSkipsUntrustedPeerWithoutResume() {
         let decision = evaluate(
-            baseInputs(isTrusted: false, hasPendingResume: false)
+            baseInputs(hasPendingResume: false, isTrusted: false)
         )
         XCTAssertEqual(
             decision,
@@ -139,7 +139,7 @@ final class AutoConnectPolicyTests: XCTestCase {
 
     func testSettingDisabledSkipsTrustedPeer() {
         let decision = evaluate(
-            baseInputs(autoConnectEnabled: false, isTrusted: true)
+            baseInputs(isTrusted: true, autoConnectEnabled: false)
         )
         XCTAssertEqual(
             decision,
@@ -151,9 +151,9 @@ final class AutoConnectPolicyTests: XCTestCase {
     func testSettingDisabledStillAllowsPendingResume() {
         let decision = evaluate(
             baseInputs(
-                autoConnectEnabled: false,
+                hasPendingResume: true,
                 isTrusted: false,
-                hasPendingResume: true
+                autoConnectEnabled: false
             )
         )
         XCTAssertEqual(
@@ -166,9 +166,9 @@ final class AutoConnectPolicyTests: XCTestCase {
     func testSettingDisabledStillAllowsTrustedPeerWithResume() {
         let decision = evaluate(
             baseInputs(
-                autoConnectEnabled: false,
+                hasPendingResume: true,
                 isTrusted: true,
-                hasPendingResume: true
+                autoConnectEnabled: false
             )
         )
         XCTAssertEqual(

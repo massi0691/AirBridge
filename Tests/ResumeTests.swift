@@ -5,6 +5,7 @@
 
 import XCTest
 import Network
+import CryptoKit
 @testable import AirBridge
 
 @MainActor
@@ -71,6 +72,52 @@ final class ResumeTests: XCTestCase {
         try? FileManager.default.removeItem(at: url)
         let metadataURL = ResumePersistence.fileURL(for: transferID)
         try? FileManager.default.removeItem(at: metadataURL)
+    }
+
+    /// Installe une clé de session ChaCha20-Poly1305 et renvoie le
+    /// chiffreur correspondant. Le chiffrement est obligatoire pour un
+    /// transfert entrant (v2) : sans clé, tout chunk est rejeté en
+    /// `.decryptionFailed` avant la moindre écriture.
+    @discardableResult
+    private func installEncryption(
+        on manager: TransferManager,
+        chunkSize: Int
+    ) -> ChunkStreamCipher {
+        let key = SymmetricKey(size: .bits256)
+        let cipher = ChunkStreamCipher(key: key)
+        manager.incomingManager.installSessionKey(key)
+        manager.incomingManager.setNegotiatedChunkSize(chunkSize)
+        return cipher
+    }
+
+    /// Chiffre un chunk puis l'injecte par le chemin réel
+    /// (`incomingManager.appendChunk`), avec le `chunkIndex` dérivé côté
+    /// récepteur (`offset / chunkSize`).
+    private func appendEncrypted(
+        _ plaintext: Data,
+        transferID: UUID,
+        offset: Int64,
+        chunkSize: Int,
+        sessionId: UUID,
+        using cipher: ChunkStreamCipher,
+        on manager: TransferManager
+    ) async -> Bool {
+        let chunkIndex = chunkSize > 0
+            ? UInt32(offset / Int64(chunkSize))
+            : UInt32(offset >> 32)
+        let sealed = cipher.encrypt(
+            plaintext,
+            transferID: transferID,
+            chunkIndex: chunkIndex,
+            sessionId: sessionId
+        )
+        return await manager.incomingManager.appendChunk(
+            transferID: transferID,
+            offset: offset,
+            data: sealed,
+            sessionId: sessionId,
+            chunkSize: chunkSize
+        )
     }
 
     // MARK: - Interruption et resumabilité
@@ -663,9 +710,14 @@ final class ResumeTests: XCTestCase {
         XCTAssertEqual(decoded.fileSize, 1_000)
     }
 
-    func testProtocolVersionsStillAcceptV1AndCurrentV2() {
-        XCTAssertTrue(ProtocolCompatibility.isSupported(1),
-                      "v1 doit rester comprise")
+    /// La plage de versions acceptée : la v1 n'est plus acceptée
+    /// (contrôle non authentiqué + chunks en clair, downgrade silencieux
+    /// possible), seule la version courante l'est.
+    func testProtocolVersionsRejectV1AndAcceptCurrentV2() {
+        XCTAssertFalse(
+            ProtocolCompatibility.isSupported(1),
+            "v1 n'est plus acceptée (anti-downgrade)"
+        )
         XCTAssertTrue(ProtocolCompatibility.isSupported(
             ProtocolCompatibility.currentVersion
         ))
@@ -749,7 +801,6 @@ final class ResumeTests: XCTestCase {
     }
 
     func testStartupRestorationSkipsOrphanMetadata() async throws {
-        let manager = makeTransferManager()
         let transferID = UUID()
         defer { cleanupPartialFiles(for: transferID) }
 
@@ -809,64 +860,66 @@ final class ResumeTests: XCTestCase {
         XCTAssertEqual(restored?.transferredBytes, 500)
     }
 
-    // MARK: - Anti-double-reprise (GAP3)
+    // MARK: - Reprise et session sécurisée (GAP3)
 
-    func testAutomaticResumeTaskIsSinglePerTransfer() async throws {
+    /// La reprise d'un transfert entrant exige une session sécurisée prête
+    /// (`isSessionReady` + `isSecureSessionReady`) avec un pair correspondant.
+    /// Sans elle, la demande est refusée et le transfert reste `.interrupted` :
+    /// un transfert ne doit jamais se réactiver silencieusement sur une
+    /// session non authentifiée — ce serait le vecteur d'un downgrade.
+    func testIncomingResumeRefusedWithoutSecureSession() async throws {
         let manager = makeTransferManager()
 
         let transferID = UUID()
         defer { cleanupPartialFiles(for: transferID) }
 
         // Créer un transfert interrompu côté réception, avec des octets
-        // réellement sur disque : la reprise exige une progression valide
-        // (0 < disque < taille annoncée).
+        // réellement sur disque : la progression est valide, c'est donc
+        // uniquement l'absence de session sécurisée qui bloque.
         let sender = makePeer()
         let request = TransferRequestPayload(
             transferID: transferID,
             fileName: "test.bin",
             fileSize: 1_000
         )
+        let cipher = installEncryption(on: manager, chunkSize: 200)
         _ = await manager.createIncomingTransfer(request: request, sender: sender)
 
-        // Acceptation puis premier chunk : l'écriture exige un état
-        // réceptif (accepted/transferring/interrupted), pas « en attente ».
         manager.markAccepted(transferID: transferID)
-        let wasWritten = await manager.appendReceivedChunk(
+        let wasWritten = await appendEncrypted(
+            Data(count: 200),
             transferID: transferID,
             offset: 0,
-            data: Data(count: 200),
-            sessionId: UUID()
+            chunkSize: 200,
+            sessionId: UUID(),
+            using: cipher,
+            on: manager
         )
         XCTAssertTrue(wasWritten, "Le chunk doit être écrit sur disque")
         XCTAssertEqual(manager.incomingPartialFileBytes(transferID: transferID), 200)
 
-        // Interruption : état non terminal, resumable
+        // Interruption : état non terminal, resumable.
         manager.markInterrupted(transferID: transferID, transferredBytes: 200)
-
-        // Vérifier l'anti-double-reprise via resumeIncomingTransfer :
-        // une première reprise passe l'état à .accepted, une seconde
-        // est rejetée car le transfert n'est plus .interrupted.
-        // Sans session active, la demande de reprise est silencieusement
-        // sans effet réseau : seul l'état est observé ici.
-        let connectionManager = makeConnectionManager(transferManager: manager)
-
-        // Première reprise : succès
-        let first = manager.resumeIncomingTransfer(
-            transferID: transferID,
-            connectionManager: connectionManager
-        )
-        XCTAssertTrue(first, "Première reprise acceptée")
-
-        // Le transfert est maintenant .accepted, plus .interrupted
         XCTAssertEqual(manager.transfers.first { $0.id == transferID }?.state,
-                       .accepted)
+                       .interrupted)
 
-        // Deuxième reprise : refusée (anti-double)
-        let second = manager.resumeIncomingTransfer(
+        // Aucune session sécurisée prête : la reprise est refusée.
+        let connectionManager = makeConnectionManager(transferManager: manager)
+        let attempt = manager.resumeIncomingTransfer(
             transferID: transferID,
             connectionManager: connectionManager
         )
-        XCTAssertFalse(second, "Double reprise refusée : état quitté")
+        XCTAssertFalse(
+            attempt,
+            "Sans session sécurisée prête, la reprise doit être refusée"
+        )
+
+        // L'état reste .interrupted : rien n'a été réactivé silencieusement.
+        XCTAssertEqual(
+            manager.transfers.first { $0.id == transferID }?.state,
+            .interrupted,
+            "Un refus ne doit pas muter l'état du transfert"
+        )
     }
 
     // MARK: - Désordre de chunks (GAP réordonnancement)
@@ -895,24 +948,33 @@ final class ResumeTests: XCTestCase {
         let chunk3 = Data([0xDD, 0xDD])   // offset 6 (arrive en dernier)
 
         // Envoi volontairement réordonné : 0, 2, 1, 3.
-        let r1 = await manager.appendReceivedChunk(
-            transferID: transferID, offset: 0, data: chunk0, sessionId: session
+        let cipher = installEncryption(on: manager, chunkSize: 2)
+        let r1 = await appendEncrypted(
+            chunk0, transferID: transferID, offset: 0,
+            chunkSize: 2, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r1)
-        let r2 = await manager.appendReceivedChunk(
-            transferID: transferID, offset: 4, data: chunk2, sessionId: session
+        let r2 = await appendEncrypted(
+            chunk2, transferID: transferID, offset: 4,
+            chunkSize: 2, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r2, "Chunk 2 bufferisé : offset 4 > writtenBytes 2")
         XCTAssertEqual(manager.incomingPartialFileBytes(transferID: transferID), 2,
                        "Le disque ne progresse pas tant que le trou n'est pas comblé")
-        let r3 = await manager.appendReceivedChunk(
-            transferID: transferID, offset: 2, data: chunk1, sessionId: session
+        let r3 = await appendEncrypted(
+            chunk1, transferID: transferID, offset: 2,
+            chunkSize: 2, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r3, "Chunk 1 comble le trou et déclenche la purge du buffer")
         XCTAssertEqual(manager.incomingPartialFileBytes(transferID: transferID), 6,
                        "Après purge, les offsets 0,2,4 sont écrits")
-        let r4 = await manager.appendReceivedChunk(
-            transferID: transferID, offset: 6, data: chunk3, sessionId: session
+        let r4 = await appendEncrypted(
+            chunk3, transferID: transferID, offset: 6,
+            chunkSize: 2, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r4)
         XCTAssertEqual(manager.incomingPartialFileBytes(transferID: transferID), 8,
@@ -946,12 +1008,17 @@ final class ResumeTests: XCTestCase {
         manager.markAccepted(transferID: transferID)
 
         let session = UUID()
-        let r1 = await manager.appendReceivedChunk(
-            transferID: transferID, offset: 0, data: Data([0x01, 0x02]), sessionId: session
+        let cipher = installEncryption(on: manager, chunkSize: 2)
+        let r1 = await appendEncrypted(
+            Data([0x01, 0x02]), transferID: transferID, offset: 0,
+            chunkSize: 2, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r1)
-        let r2 = await manager.appendReceivedChunk(
-            transferID: transferID, offset: 4, data: Data([0x05, 0x06]), sessionId: session
+        let r2 = await appendEncrypted(
+            Data([0x05, 0x06]), transferID: transferID, offset: 4,
+            chunkSize: 2, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r2, "Le chunk 2 (offset 4) reste en mémoire : offset 2 manque")
 

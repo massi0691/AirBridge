@@ -51,11 +51,19 @@ final class SessionIdSharingTests: XCTestCase {
     // MARK: - Fabriques
 
     private func makeLocalDevice() -> Device {
-        Device(
+        // Le `keyExchange` sortant doit être signé : `ConnectionManager.send`
+        // refuse un message dont `sender.publicKeyData` est nil. On récupère
+        // donc la clé long-terme du Keychain (accessible aux tests unitaires,
+        // cf. `SecureIdentityTests` / `MessageAuthenticatorTests`), faute de
+        // quoi le handshake sécurisé échoue et détruit le sessionId généré.
+        let identity = try? SecureIdentityStore.ensureIdentity()
+
+        return Device(
             id: UUID(),
             name: "LocalDevice",
             model: "iPhone",
-            systemVersion: "26.5"
+            systemVersion: "26.5",
+            publicKeyData: identity?.publicKeyData
         )
     }
 

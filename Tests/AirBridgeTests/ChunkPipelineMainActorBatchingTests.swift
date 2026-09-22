@@ -216,20 +216,22 @@ final class ChunkPipelineMainActorBatchingTests: XCTestCase {
                                 // n'est pas Optional dans le struct.
     }
 
-    /// Le snapshot doit capturer la version de protocole par défaut (1)
-    /// quand aucune négociation n'a eu lieu. C'est le comportement
-    /// de la voie v1 pour la rétro-compatibilité.
-    func test_snapshotDefaultsToProtocolVersionOne() {
+    /// Le snapshot doit capturer la version de protocole par défaut
+    /// (`ProtocolCompatibility.currentVersion`, soit v2) quand aucune
+    /// négociation n'a eu lieu. La v1 n'est plus acceptée : un transfert
+    /// ne doit jamais se rabattre implicitement vers elle.
+    func test_snapshotDefaultsToProtocolVersionTwo() {
         let manager = makeOutgoingManager()
         manager.setConnection(makeFakeConnection())
         // Pas d'appel à `setProtocolVersion` : la valeur par défaut
-        // du manager (1) doit transparaître dans le snapshot.
+        // du manager doit transparaître dans le snapshot.
         let snapshot = manager.snapshotForSending()
 
         XCTAssertEqual(
-            snapshot.protocolVersion, 1,
-            "Sans négociation explicite, le snapshot doit porter v1 " +
-            "(reçu \(snapshot.protocolVersion))"
+            snapshot.protocolVersion,
+            ProtocolCompatibility.currentVersion,
+            "Sans négociation explicite, le snapshot doit porter la " +
+            "version courante (reçu \(snapshot.protocolVersion))"
         )
         XCTAssertNil(
             snapshot.sessionId,

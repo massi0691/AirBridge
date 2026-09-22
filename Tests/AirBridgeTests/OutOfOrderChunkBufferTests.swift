@@ -2,7 +2,7 @@
 //  OutOfOrderChunkBufferTests.swift
 //  AirBridge
 //
-//  Test de non-régression : un chunk très en avance (offset 492 830 720)
+//  Test de non-régression : un chunk très en avance (offset 16 777 216)
 //  arrivant avant ses prédécesseurs ne doit pas faire échouer le transfert
 //  ni corrompre le fichier : le manager le met de côté et le purge dans
 //  l'ordre logique une fois les morceaux manquants reçus.
@@ -39,6 +39,53 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         try? FileManager.default.removeItem(at: url)
     }
 
+    /// Installe une clé de session ChaCha20-Poly1305 sur le manager et
+    /// renvoie le chiffreur correspondant. Le chiffrement est désormais
+    /// obligatoire pour tout transfert entrant (v2) : un chunk injecté
+    /// sans clé est rejeté en `.decryptionFailed` avant toute écriture.
+    @discardableResult
+    private func installEncryption(
+        on manager: TransferManager,
+        chunkSize: Int
+    ) -> ChunkStreamCipher {
+        let key = SymmetricKey(size: .bits256)
+        let cipher = ChunkStreamCipher(key: key)
+        manager.incomingManager.installSessionKey(key)
+        manager.incomingManager.setNegotiatedChunkSize(chunkSize)
+        return cipher
+    }
+
+    /// Chiffre un chunk puis l'injecte par le chemin réel
+    /// (`incomingManager.appendChunk`), avec le `chunkIndex` que le
+    /// récepteur dérive lui-même (`offset / chunkSize`) : la garde
+    /// anti-saturation et le déchiffrement portent sur les mêmes octets.
+    private func appendEncrypted(
+        _ plaintext: Data,
+        transferID: UUID,
+        offset: Int64,
+        chunkSize: Int,
+        sessionId: UUID,
+        using cipher: ChunkStreamCipher,
+        on manager: TransferManager
+    ) async -> Bool {
+        let chunkIndex = chunkSize > 0
+            ? UInt32(offset / Int64(chunkSize))
+            : UInt32(offset >> 32)
+        let sealed = cipher.encrypt(
+            plaintext,
+            transferID: transferID,
+            chunkIndex: chunkIndex,
+            sessionId: sessionId
+        )
+        return await manager.incomingManager.appendChunk(
+            transferID: transferID,
+            offset: offset,
+            data: sealed,
+            sessionId: sessionId,
+            chunkSize: chunkSize
+        )
+    }
+
     // MARK: - Régression : chunk très en avance
 
     /// Reproduit le bug rapporté : l'émetteur envoie ses chunks dans un
@@ -47,11 +94,8 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
     /// récepteur doit :
     ///   1. accepter le chunk à offset 0 et l'écrire immédiatement ;
     ///   2. bufferiser le chunk à offset 2 097 152 (2 Mo) en mémoire ;
-    ///   3. bufferiser le chunk à offset 492 830 720 (≈ 470 Mo) en
-    ///      mémoire ;
-    ///   4. refuser d'écrire le chunk à offset 65 536 (incohérent :
-    ///      avant un trou qui n'est pas à combler) ;
-    ///   5. finaliser sans jamais appeler `markFailed` sur un simple
+    ///   3. bufferiser le chunk à offset 16 777 216 (16 Mo) en mémoire ;
+    ///   4. finaliser sans jamais appeler `markFailed` sur un simple
     ///      désordre : seul un trou définitif à la finalisation doit
     ///      faire échouer le transfert.
     func testOutOfOrderChunksAreBufferedAndDrainedInOrder() async throws {
@@ -64,6 +108,12 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
                                      // payload logique couvre un trou
                                      // énorme (testé via le buffer, pas
                                      // la taille réelle du fichier).
+        let payloadSize = 256
+        // Chiffrement de session obligatoire (v2) : installé avant la
+        // création du transfert pour que les chunks injectés soient
+        // déchiffrables.
+        let cipher = installEncryption(on: manager, chunkSize: payloadSize)
+
         let sender = makePeer()
         let request = TransferRequestPayload(
             transferID: transferID,
@@ -77,23 +127,21 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         manager.markAccepted(transferID: transferID)
 
         let session = UUID()
-        let payloadSize = 256
 
         // 2. Concaténation de référence : tous les octets dans l'ordre
-        //    logique (0, 65536, 2097152, 492830720). Le test ne peut pas
-        //    réellement écrire 470 Mo ; on borne `fileSize` à 4 KiB et
-        //    on vérifie que le buffer de chunks ne corrompt pas le
-        //    fichier. Le SHA-256 est calculé sur ce qui est *réellement*
-        //    sur disque à la fin.
+        //    logique (0, 2 Mo, 16 Mo). Le test ne peut pas réellement
+        //    écrire 16 Mo ; on borne `fileSize` à 4 KiB et on vérifie que
+        //    le buffer de chunks ne corrompe pas le fichier. Le SHA-256
+        //    est calculé sur ce qui est *réellement* sur disque à la fin.
         let patternA = Data(repeating: 0xA1, count: payloadSize)
         let patternB = Data(repeating: 0xB2, count: payloadSize)
         let patternC = Data(repeating: 0xC3, count: payloadSize)
-        let patternD = Data(repeating: 0xD4, count: payloadSize)
 
         // 3. Chunk offset=0 : dans l'ordre, écrit immédiatement.
-        let r0 = await manager.appendReceivedChunk(
-            transferID: transferID, offset: 0,
-            data: patternA, sessionId: session
+        let r0 = await appendEncrypted(
+            patternA, transferID: transferID, offset: 0,
+            chunkSize: payloadSize, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r0, "Chunk 0 écrit directement")
         XCTAssertEqual(
@@ -103,9 +151,10 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         )
 
         // 4. Chunk offset=2 097 152 : en avance, bufferisé.
-        let r1 = await manager.appendReceivedChunk(
-            transferID: transferID, offset: 2_097_152,
-            data: patternB, sessionId: session
+        let r1 = await appendEncrypted(
+            patternB, transferID: transferID, offset: 2_097_152,
+            chunkSize: payloadSize, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r1, "Chunk à offset 2 Mo bufferisé (trou à combler)")
         XCTAssertEqual(
@@ -114,14 +163,18 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
             "Le disque n'avance pas tant que le trou n'est pas comblé"
         )
 
-        // 5. Chunk offset=492 830 720 : très en avance, bufferisé.
-        //    C'est précisément le cas de la régression : sans buffer
-        //    de chunks, ce décalage ferait échouer le transfert.
-        let r2 = await manager.appendReceivedChunk(
-            transferID: transferID, offset: 492_830_720,
-            data: patternC, sessionId: session
+        // 5. Chunk offset=16 777 216 : très en avance, bufferisé. La
+        //    fenêtre anti-saturation du buffer est de 64 MiB
+        //    (`maximumPendingGap`) : un chunk au-delà serait légitimement
+        //    refusé. On reste en dessous pour garder l'esprit du test
+        //    d'origine (un chunk loin devant ses prédécesseurs) sans
+        //    déclencher cette garde.
+        let r2 = await appendEncrypted(
+            patternC, transferID: transferID, offset: 16_777_216,
+            chunkSize: payloadSize, sessionId: session,
+            using: cipher, on: manager
         )
-        XCTAssertTrue(r2, "Chunk à offset 470 Mo bufferisé (trou à combler)")
+        XCTAssertTrue(r2, "Chunk à offset 16 Mo bufferisé (trou à combler)")
         XCTAssertEqual(
             manager.incomingPartialFileBytes(transferID: transferID),
             Int64(payloadSize),
@@ -180,6 +233,7 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         defer { cleanupPartialFiles(for: transferID) }
 
         let chunkSize = 256
+        let cipher = installEncryption(on: manager, chunkSize: chunkSize)
         let totalChunks = 8
         let fileSize = Int64(chunkSize * totalChunks)
 
@@ -212,9 +266,10 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         for index in order {
             let offset = Int64(index * chunkSize)
             let payload = Data(repeating: UInt8(index), count: chunkSize)
-            let r = await manager.appendReceivedChunk(
-                transferID: transferID, offset: offset,
-                data: payload, sessionId: session
+            let r = await appendEncrypted(
+                payload, transferID: transferID, offset: offset,
+                chunkSize: chunkSize, sessionId: session,
+                using: cipher, on: manager
             )
             XCTAssertTrue(r, "Chunk \(index) (offset \(offset)) accepté")
         }
@@ -258,6 +313,7 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         defer { cleanupPartialFiles(for: transferID) }
 
         let chunkSize = 256
+        let cipher = installEncryption(on: manager, chunkSize: chunkSize)
         let totalChunks = 6
         let fileSize = Int64(chunkSize * totalChunks)
 
@@ -287,11 +343,10 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         for index in order {
             let offset = Int64(index * chunkSize)
             let payload = Data(repeating: UInt8(index), count: chunkSize)
-            let r = await manager.appendReceivedChunk(
-                transferID: transferID,
-                offset: offset,
-                data: payload,
-                sessionId: session
+            let r = await appendEncrypted(
+                payload, transferID: transferID, offset: offset,
+                chunkSize: chunkSize, sessionId: session,
+                using: cipher, on: manager
             )
             XCTAssertTrue(r, "Chunk \(index) (offset \(offset)) accepté")
         }
@@ -339,6 +394,7 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         defer { cleanupPartialFiles(for: transferID) }
 
         let chunkSize = 256
+        let cipher = installEncryption(on: manager, chunkSize: chunkSize)
         let totalChunks = 4
         let fileSize = Int64(chunkSize * totalChunks)
 
@@ -366,16 +422,18 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         // doublon à l'offset 0 AVANT de compléter le fichier. Le
         // doublon arrive avec un payload de poison, mais avec une
         // taille compatible avec le plafond restant.
-        let r1 = await manager.appendReceivedChunk(
+        let r1 = await appendEncrypted(
+            Data(repeating: 0x00, count: chunkSize),
             transferID: transferID, offset: 0,
-            data: Data(repeating: 0x00, count: chunkSize),
-            sessionId: session
+            chunkSize: chunkSize, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r1)
-        let r2dup = await manager.appendReceivedChunk(
+        let r2dup = await appendEncrypted(
+            Data(repeating: 0x01, count: chunkSize),
             transferID: transferID, offset: Int64(chunkSize),
-            data: Data(repeating: 0x01, count: chunkSize),
-            sessionId: session
+            chunkSize: chunkSize, sessionId: session,
+            using: cipher, on: manager
         )
         XCTAssertTrue(r2dup)
 
@@ -388,11 +446,14 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         // Doublon à offset 0, payload poison. Le plafond n'est pas
         // saturé (projection = 512 + 0 + 256 = 768 ≤ 1024), donc on
         // atteint la branche `offset < writtenBytes`.
-        let r2d = await manager.appendReceivedChunk(
+        let r2d = await appendEncrypted(
+            Data(repeating: 0xFF, count: chunkSize),
             transferID: transferID,
             offset: 0,
-            data: Data(repeating: 0xFF, count: chunkSize),
-            sessionId: session
+            chunkSize: chunkSize,
+            sessionId: session,
+            using: cipher,
+            on: manager
         )
         XCTAssertTrue(r2d, "Le doublon est accepté (return true) mais ignoré")
 
@@ -406,9 +467,10 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         for index in 2..<totalChunks {
             let offset = Int64(index * chunkSize)
             let payload = Data(repeating: UInt8(index), count: chunkSize)
-            let rComplete = await manager.appendReceivedChunk(
-                transferID: transferID, offset: offset,
-                data: payload, sessionId: session
+            let rComplete = await appendEncrypted(
+                payload, transferID: transferID, offset: offset,
+                chunkSize: chunkSize, sessionId: session,
+                using: cipher, on: manager
             )
             XCTAssertTrue(rComplete)
         }
@@ -441,6 +503,7 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         defer { cleanupPartialFiles(for: transferID) }
 
         let chunkSize = 256
+        let cipher = installEncryption(on: manager, chunkSize: chunkSize)
         let totalChunks = 4
         let fileSize = Int64(chunkSize * totalChunks)
 
@@ -469,9 +532,10 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         for index in 0..<2 {
             let offset = Int64(index * chunkSize)
             let payload = Data(repeating: UInt8(index), count: chunkSize)
-            let r1 = await manager.appendReceivedChunk(
-                transferID: transferID, offset: offset,
-                data: payload, sessionId: session
+            let r1 = await appendEncrypted(
+                payload, transferID: transferID, offset: offset,
+                chunkSize: chunkSize, sessionId: session,
+                using: cipher, on: manager
             )
             XCTAssertTrue(r1)
         }
@@ -481,12 +545,17 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         )
 
         // Un chunk ancien (offset 0) arrive en retard, avec un contenu
-        // différent. Il doit être ignoré sans modifier le disque.
-        let r2late = await manager.appendReceivedChunk(
+        // différent. Il doit être ignoré sans modifier le disque. Le
+        // chunkIndex est le même que l'original (offset 0) : sinon le
+        // tag Poly1305 serait rejeté avant la branche du doublon.
+        let r2late = await appendEncrypted(
+            Data(repeating: 0xEE, count: chunkSize),
             transferID: transferID,
             offset: 0,
-            data: Data(repeating: 0xEE, count: chunkSize),
-            sessionId: session
+            chunkSize: chunkSize,
+            sessionId: session,
+            using: cipher,
+            on: manager
         )
         XCTAssertTrue(r2late, "Un chunk tardif est accepté mais ignoré")
 
@@ -500,9 +569,10 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         for index in 2..<totalChunks {
             let offset = Int64(index * chunkSize)
             let payload = Data(repeating: UInt8(index), count: chunkSize)
-            let rComplete = await manager.appendReceivedChunk(
-                transferID: transferID, offset: offset,
-                data: payload, sessionId: session
+            let rComplete = await appendEncrypted(
+                payload, transferID: transferID, offset: offset,
+                chunkSize: chunkSize, sessionId: session,
+                using: cipher, on: manager
             )
             XCTAssertTrue(rComplete)
         }
@@ -656,6 +726,7 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         defer { cleanupPartialFiles(for: transferID) }
 
         let chunkSize = 256
+        let cipher = installEncryption(on: manager, chunkSize: chunkSize)
         let totalChunks = 5
         let fileSize = Int64(chunkSize * totalChunks)
 
@@ -683,9 +754,10 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         for index in received {
             let offset = Int64(index * chunkSize)
             let payload = Data(repeating: UInt8(index), count: chunkSize)
-            let rLost = await manager.appendReceivedChunk(
-                transferID: transferID, offset: offset,
-                data: payload, sessionId: session
+            let rLost = await appendEncrypted(
+                payload, transferID: transferID, offset: offset,
+                chunkSize: chunkSize, sessionId: session,
+                using: cipher, on: manager
             )
             XCTAssertTrue(rLost)
         }
@@ -729,6 +801,7 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         defer { cleanupPartialFiles(for: transferID) }
 
         let chunkSize = 256
+        let cipher = installEncryption(on: manager, chunkSize: chunkSize)
         let totalChunks = 8
         let fileSize = Int64(chunkSize * totalChunks)
 
@@ -749,9 +822,10 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         for index in received {
             let offset = Int64(index * chunkSize)
             let payload = Data(repeating: UInt8(index), count: chunkSize)
-            let rLost2 = await manager.appendReceivedChunk(
-                transferID: transferID, offset: offset,
-                data: payload, sessionId: session
+            let rLost2 = await appendEncrypted(
+                payload, transferID: transferID, offset: offset,
+                chunkSize: chunkSize, sessionId: session,
+                using: cipher, on: manager
             )
             XCTAssertTrue(rLost2)
         }
@@ -823,6 +897,9 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         let transferID = UUID()
         defer { cleanupPartialFiles(for: transferID) }
 
+        // Chiffrement de session obligatoire (v2).
+        let cipher = installEncryption(on: manager, chunkSize: chunkSize)
+
         let sender = makePeer()
         let request = TransferRequestPayload(
             transferID: transferID,
@@ -834,15 +911,32 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
 
         let session = UUID()
 
+        // Pré-chiffre tous les chunks en dehors de la mesure : le débit
+        // mesuré doit couvrir le chemin de réception réel (déchiffrement
+        // ChaCha20-Poly1305 + réordonnancement + écriture disque), pas le
+        // chiffrement qui appartient à l'émetteur.
+        var sealedChunks: [Int: Data] = [:]
+        for index in 0..<totalChunks {
+            let sliceStart = index * chunkSize
+            let sliceEnd = sliceStart + chunkSize
+            let plain = referenceData.subdata(in: sliceStart..<sliceEnd)
+            sealedChunks[index] = cipher.encrypt(
+                plain,
+                transferID: transferID,
+                chunkIndex: UInt32(index),
+                sessionId: session
+            )
+        }
+
         let start = Date()
         for index in order {
             let offset = Int64(index * chunkSize)
-            let sliceStart = index * chunkSize
-            let sliceEnd = sliceStart + chunkSize
-            let slice = referenceData.subdata(in: sliceStart..<sliceEnd)
-            _ = await manager.appendReceivedChunk(
-                transferID: transferID, offset: offset,
-                data: slice, sessionId: session
+            _ = await manager.incomingManager.appendChunk(
+                transferID: transferID,
+                offset: offset,
+                data: sealedChunks[index]!,
+                sessionId: session,
+                chunkSize: chunkSize
             )
         }
         let elapsed = Date().timeIntervalSince(start)
@@ -865,11 +959,16 @@ final class OutOfOrderChunkBufferTests: XCTestCase {
         XCTAssertEqual(actualHash, expectedHash,
                        "SHA-256 du fichier réordonné == SHA-256 de la référence")
 
-        // Seuil post-fix : ≥ 350 MB/s. La majorité du temps est en
-        // écriture disque, pas en tri mémoire.
+        // Seuil : ≥ 150 MB/s. Le chemin mesuré inclut désormais le
+        // déchiffrement ChaCha20-Poly1305 de chaque chunk (chemin de
+        // production réel), qui n'était pas dans la version plaintext de
+        // ce test : on garde une marge sous les ~230 MB/s observés pour
+        // détecter une régression franche (le référentiel historique,
+        // avant le retrait du MainActor, était 7-10 MB/s) sans être
+        // victime des variations de la machine.
         XCTAssertGreaterThanOrEqual(
-            throughput, 350.0,
-            "Débit ≥ 350 MB/s malgré 10% de désordre (mesuré : \(throughput) MB/s)"
+            throughput, 150.0,
+            "Débit ≥ 150 MB/s malgré 10% de désordre (mesuré : \(throughput) MB/s)"
         )
     }
 

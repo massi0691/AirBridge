@@ -243,13 +243,13 @@ final class TransferConfirmationTests: XCTestCase {
         let current = store.transfer(withID: transfer.id)
         XCTAssertEqual(current?.state, .failed)
         XCTAssertNotEqual(current?.state, .completed)
-        XCTAssertNotEqual(current?.state?.displayName, "Réussi")
+        XCTAssertNotEqual(current?.state.displayName, "Réussi")
 
         // Côté UI : statut « Échec », jamais « Réussi » ni vert de
         // succès.
-        let uiStatus = TransferViewModel.status(for: .failed)
-        XCTAssertEqual(uiStatus, .failed)
-        XCTAssertNotEqual(uiStatus, .completed)
+        let uiStatus = TransferViewModel.status(for: Transfer.State.failed)
+        XCTAssertEqual(uiStatus, TransferUIStatus.failed)
+        XCTAssertNotEqual(uiStatus, TransferUIStatus.completed)
         XCTAssertNotEqual(uiStatus.displayName, "Réussi")
     }
 

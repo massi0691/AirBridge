@@ -482,12 +482,15 @@ struct AirBridgeApp: App {
                directive.targetPeerID == requestedPeerID,
                let core = coreHolder?.core {
                 let last = core.lastConnectedDevice
+                let isKnownPeer = last?.id == directive.targetPeerID
+
                 let peer = Device(
                     id: directive.targetPeerID,
                     name: directive.targetPeerName,
-                    model: last?.id == directive.targetPeerID
-                        ? (last?.model ?? "Appareil")
-                        : "Appareil"
+                    model: isKnownPeer ? (last?.model ?? "Appareil") : "Appareil",
+                    systemVersion: isKnownPeer
+                        ? (last?.systemVersion ?? "Inconnue")
+                        : "Inconnue"
                 )
                 // Présentation d'abord (la feuille montre l'attente
                 // d'éventuelle connexion), programmation ensuite : si la
