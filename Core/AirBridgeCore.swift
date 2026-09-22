@@ -114,15 +114,16 @@ final class AirBridgeCore {
     /// Bonjour redéclenche `onDeviceDiscovered` pour TOUS les appareils à
     /// chaque changement du jeu de résultats (et ces changements sont
     /// fréquents : TXT records, interfaces réseau…) : sans anti-rafale,
-    /// chaque événement relancerait une tentative de connexion. Une seule
-    /// tentative par pair et par fenêtre `autoConnectMinInterval`.
+    /// chaque événement relancerait une tentative de connexion. La fenêtre
+    /// est calculée par `AutoConnectPolicy.retryInterval` (backoff
+    /// exponentiel plafonné, croissant avec `autoConnectFailureCounts`).
     private var lastAutoConnectAttempts: [UUID: Date] = [:]
 
-    /// Intervalle minimal entre deux tentatives de connexion automatique
-    /// vers un même pair. Une session qui tombe « consomme » la tentative
-    /// (elle est retirée du registre dans `onSessionClosed`) : la
-    /// reconnexion peut alors repartir dès la redécouverte suivante.
-    private static let autoConnectMinInterval: TimeInterval = 15
+    /// Échecs de session consécutifs (jamais de session sécurisée
+    /// établie) par pair, depuis le dernier succès. Alimente le backoff
+    /// d'`AutoConnectPolicy` : 15 s puis 30 s, 60 s, 120 s, 240 s.
+    /// Remis à zéro dès qu'une session sécurisée aboutit vers ce pair.
+    private var autoConnectFailureCounts: [UUID: Int] = [:]
 
     /// Pairs dont la connexion automatique est suspendue suite à une
     /// déconnexion EXPLICITE de l'utilisateur. La suspension est levée
@@ -137,6 +138,47 @@ final class AirBridgeCore {
     /// les sorties du réseau (pair absent du nouveau jeu de résultats)
     /// pour lever la suspension de connexion automatique à son retour.
     private var previouslyDiscoveredPeerIDs: Set<UUID> = []
+
+    // MARK: - Dernier appareil connecté (partagé avec l'extension Finder)
+
+    /// Dernier pair avec lequel une session a existé, conservé après
+    /// déconnexion. Publié dans l'App Group pour que l'extension Finder
+    /// puisse proposer « Envoyer à <dernier appareil> » (l'extension est
+    /// un processus séparé, sans accès au socket de l'app).
+    private(set) var lastConnectedDevice: Device?
+
+    // MARK: - Envoi ciblé programmé (« Envoyer à <X> »)
+
+    /// Envoi demandé explicitement pour un pair qui n'est pas encore
+    /// connecté : il partira automatiquement dès que la session avec ce
+    /// pair exact devient sécurisée (auto-connexion, redécouverte…),
+    /// dans la limite de `targetedSendLifetime`.
+    private struct ScheduledTargetedSend {
+        let recipientID: UUID
+        let urls: [URL]
+        let issuedAt: Date
+    }
+
+    private var scheduledTargetedSend: ScheduledTargetedSend?
+
+    /// Nom du destinataire de l'envoi programmé — exposé pour l'UI
+    /// (bandeau « Connexion à X en cours — envoi automatique… »).
+    private(set) var scheduledTargetedSendPeerName: String?
+
+    /// Durée de validité d'un envoi ciblé programmé (secondes). Passé ce
+    /// délai sans session sécurisée avec le bon pair, l'envoi est
+    /// abandonné et les fichiers restent dans la feuille d'envoi.
+    private static let targetedSendLifetime: TimeInterval = 120
+
+    /// Émis quand un envoi ciblé programmé est soldé :
+    /// `(peerID, succès)` — `succès == true` signifie que le Core a
+    /// importé les fichiers dans sa file sortante.
+    var onTargetedSendFinished: ((UUID, Bool) -> Void)?
+
+    /// Vrai une fois la session *sécurisée* (ECDH/HKDF aboutis) de la
+    /// session courante — distingue un échec de connexion (à compter
+    /// pour le backoff) d'une session ouverte puis fermée normalement.
+    private var currentSessionDidReachSecureReady = false
 
     // MARK: - Délais de sécurité (jamais d'attente infinie)
 
@@ -884,6 +926,19 @@ final class AirBridgeCore {
         guard connectionManager.connectedDevice != nil else {
             logger.error("Aucun appareil connecté")
             return false
+        }
+
+        // Un envoi ciblé programmé portant sur (au moins) un des mêmes
+        // fichiers est obsolète : l'envoi explicite en cours le remplace.
+        // Sans cette annulation, le lot partait une seconde fois quand
+        // la programmation trouvait sa session plus tard.
+        if let pending = scheduledTargetedSend,
+           !Set(pending.urls).isDisjoint(with: urls) {
+            scheduledTargetedSend = nil
+            scheduledTargetedSendPeerName = nil
+            logger.info(
+                "Envoi ciblé programmé annulé : remplacé par un envoi explicite"
+            )
         }
 
         let plans = OutgoingSelectionPlanner.plans(for: urls)
@@ -2007,6 +2062,17 @@ final class AirBridgeCore {
             self?.handleDeviceDiscovered(discovered)
         }
 
+        // Jeu de résultats Bonjour modifié (y compris passage à vide) :
+        // mise à jour de la présence AVANT l'évaluation des connexions
+        // automatiques par appareil. C'est ce callback — et lui seul —
+        // qui observe les DÉPARTS : `onDeviceDiscovered` n'est jamais
+        // invoqué pour un pair qui quitte le réseau, si bien que la
+        /// suspension d'auto-connexion après déconnexion explicite n'était
+        /// jamais levée à son retour (bug « plus de reconnexion »).
+        bonjourService.onDiscoveryResultsChanged = { [weak self] currentIDs in
+            self?.updateDiscoveredPeerPresence(current: currentIDs)
+        }
+
         connectionManager.onSessionReady = { [weak self] connection in
             guard let self else { return }
             self.transferManager.outgoingManager.setConnection(connection)
@@ -2217,11 +2283,35 @@ final class AirBridgeCore {
             // sans attendre la fenêtre d'anti-rafale. Pour une déconnexion
             // explicite, la suspension posée par `disconnectFromPeer`
             // bloque de toute façon la reconnexion.
+            //
+            // Un échec (session n'ayant JAMAIS atteint la sécurité)
+            // augmente le compteur de backoff du pair : les relances
+            // s'écartent (15 s → 240 s) au lieu de marteler un pair
+            // injoignable. Une session qui avait abouti remet le compteur
+            // à zéro.
             if let identifiedPeer {
                 self.lastAutoConnectAttempts.removeValue(
                     forKey: identifiedPeer.id
                 )
+                if self.currentSessionDidReachSecureReady {
+                    self.autoConnectFailureCounts.removeValue(
+                        forKey: identifiedPeer.id
+                    )
+                } else {
+                    let previous = self.autoConnectFailureCounts[
+                        identifiedPeer.id
+                    ] ?? 0
+                    self.autoConnectFailureCounts[identifiedPeer.id] =
+                        previous + 1
+                }
+                // Partage de l'état avec l'extension Finder : le pair
+                // reste le « dernier appareil connecté » (sessionClose),
+                // mais la session est marquée fermée.
+                AirBridgeSharedStateStore.publishSessionClosed(
+                    peerID: identifiedPeer.id
+                )
             }
+            self.currentSessionDidReachSecureReady = false
 
             // Le drapeau est baissé ici plutôt qu'à `onSessionReady` :
             // une seconde déconnexion peut survenir avant toute
@@ -3216,6 +3306,28 @@ final class AirBridgeCore {
             return false
         }
 
+        currentSessionDidReachSecureReady = true
+
+        // Session sécurisée établie : succès pour le pair concerné —
+        // le backoff d'auto-connexion repart à zéro (prochaine coupure
+        // pourra reconnecter après la fenêtre de base, pas après 240 s).
+        if let peer = connectionManager.connectedDevice {
+            lastConnectedDevice = peer
+            autoConnectFailureCounts.removeValue(forKey: peer.id)
+            lastAutoConnectAttempts.removeValue(forKey: peer.id)
+            // État partagé avec l'extension Finder : « Envoyer à
+            // <dernier appareil> » devient disponible une fois la
+            // session sécurisée ouverte.
+            AirBridgeSharedStateStore.publishSessionOpened(
+                peerID: peer.id,
+                name: peer.name,
+                model: peer.model
+            )
+        }
+
+        // Un envoi ciblé programmé vers ce pair peut partir maintenant.
+        consumeScheduledTargetedSendIfReady()
+
         return true
     }
 
@@ -3832,18 +3944,15 @@ final class AirBridgeCore {
     ///
     /// Garde-fous : aucune connexion si une session est déjà active, si le
     /// pair est bloqué, si l'utilisateur vient de se déconnecter
-    /// explicitement de ce pair, et au plus une tentative par pair et par
-    /// fenêtre `autoConnectMinInterval` (Bonjour redéclenche cet événement
-    /// très fréquemment).
+    /// explicitement de ce pair, et selon le backoff d'`AutoConnectPolicy`
+    /// (fenêtre croissante : 15 s → 240 s ; Bonjour redéclenche cet
+    /// événement très fréquemment). La préférence utilisateur
+    /// « Connexion automatique » (Réglages) ne masque que le motif
+    /// « pair de confiance » : les reprises de transfert restent actives.
     private func handleDeviceDiscovered(
         _ discovered: DiscoveredDevice
     ) {
         let device = discovered.device
-
-        // Présence : un pair qui disparaît des résultats puis revient est
-        // considéré comme « nouveau » — la suspension d'une déconnexion
-        // volontaire est levée à son retour.
-        refreshDiscoveredPeerPresence()
 
         guard connectionManager.session == nil else { return }
 
@@ -3853,23 +3962,30 @@ final class AirBridgeCore {
 
         let isTrustedPeer = pairingStore.isTrusted(device.id)
 
-        guard hasInterruptedForPeer || isTrustedPeer else { return }
+        // Décision déléguée à la politique pure (réglage utilisateur,
+        // blocage, déconnexion explicite, backoff exponentiel) — testable
+        // en isolation via `AutoConnectPolicyTests`.
+        let decision = AutoConnectPolicy.evaluate(
+            hasSession: connectionManager.session != nil,
+            hasPendingResume: hasInterruptedForPeer,
+            isTrusted: isTrustedPeer,
+            isBlocked: pairingStore.isBlocked(device.id),
+            isUserDisconnected: autoConnectSuppressedPeers.contains(
+                device.id
+            ),
+            autoConnectEnabled: AutoConnectPolicy.isEnabled(),
+            lastAttempt: lastAutoConnectAttempts[device.id],
+            failureCount: autoConnectFailureCounts[device.id] ?? 0
+        )
 
-        // Un pair bloqué ne doit jamais être connecté automatiquement
-        // (ni manuellement d'ailleurs, mais la découverte ne connaît pas
-        // l'intention de l'utilisateur : on filtre ici).
-        guard !pairingStore.isBlocked(device.id) else { return }
-
-        // Déconnexion explicite encore en vigueur pour ce pair.
-        guard !autoConnectSuppressedPeers.contains(device.id) else { return }
-
-        // Anti-rafale : une seule tentative par pair et par fenêtre.
-        let now = Date()
-        if let lastAttempt = lastAutoConnectAttempts[device.id],
-           now.timeIntervalSince(lastAttempt) < Self.autoConnectMinInterval {
+        guard case .connect = decision else {
+            if case let .skip(reason) = decision {
+                logger.debug(
+                    "Auto-connexion de \(device.name, privacy: .public) ignorée : \(String(describing: reason), privacy: .public)"
+                )
+            }
             return
         }
-        lastAutoConnectAttempts[device.id] = now
 
         if hasInterruptedForPeer {
             logger.info("Pair redécouvert avec reprises en attente : \(device.name, privacy: .public)")
@@ -3877,6 +3993,7 @@ final class AirBridgeCore {
             logger.info("Pair de confiance redécouvert : connexion automatique vers \(device.name, privacy: .public)")
         }
 
+        lastAutoConnectAttempts[device.id] = Date()
         lastKnownPeerID = device.id
         connectionManager.rememberConnectedPeer(device)
         // La redécouverte fournit une endpoint fraîche : c'est la seule
@@ -3884,26 +4001,31 @@ final class AirBridgeCore {
         // campagne elle-même ne s'ouvrira qu'à la confirmation `.ready`
         // (via `onSessionReady`), avec une seule tâche par transfert.
         connectionManager.connect(to: discovered)
+
+        // Un envoi ciblé programmé vers CE pair peut démarrer d'ici :
+        // la session ouverte par `connect` déclenchera la consommation
+        // à `installSessionKeyAndMarkReady`.
+        expireScheduledTargetedSendIfStale()
     }
 
     /// Met à jour l'ensemble des pairs actuellement découverts et lève la
     /// suspension de connexion automatique des pairs qui avaient quitté le
-    /// réseau (ils ne sont plus dans les résultats Bonjour).
+    /// réseau (absents du nouveau jeu de résultats).
     ///
-    /// Appelé à chaque événement de découverte ; idempotent quand le jeu
-    /// de résultats ne change pas (Bonjour redéclenche pourtant l'événement
-    /// pour tous les appareils à chaque changement).
-    private func refreshDiscoveredPeerPresence() {
-        let current = Set(
-            bonjourService.discoveredDevices.map { $0.device.id }
-        )
-
+    /// Appelé depuis `BonjourService.onDiscoveryResultsChanged` à chaque
+    /// changement du jeu — y compris quand le jeu devient vide : c'est le
+    /// cas que l'ancien point d'appui (boucle par appareil dans
+    /// `handleDeviceDiscovered`) ne pouvait jamais observer, ce qui
+    /// laissait la suspension « déconnexion explicite » collée même après
+    /// un aller-retour du pair hors réseau.
+    private func updateDiscoveredPeerPresence(current: Set<UUID>) {
         let disappeared = previouslyDiscoveredPeerIDs.subtracting(current)
 
         if !disappeared.isEmpty {
             autoConnectSuppressedPeers.subtract(disappeared)
             for peerID in disappeared {
                 lastAutoConnectAttempts.removeValue(forKey: peerID)
+                autoConnectFailureCounts.removeValue(forKey: peerID)
             }
         }
 
@@ -3935,8 +4057,121 @@ final class AirBridgeCore {
         }
         connectionManager.disconnect()
     }
-    
-    
+
+    // MARK: - Envoi ciblé programmé (« Envoyer à <dernier appareil> »)
+
+    /// Programme l'envoi d'`urls` vers `peer` :
+    ///  - si la session avec CE pair est déjà sécurisée → envoi
+    ///    immédiat (`onTargetedSendFinished` émis) ;
+    ///  - sinon → mémorisation de l'intention + déclenchement d'une
+    ///    connexion vers ce pair s'il est découvert (la découverte
+    ///    alimente aussi l'auto-connexion), l'envoi partant à la
+    ///    confirmation de la session sécurisée, dans la limite de
+    ///    `targetedSendLifetime`.
+    ///
+    /// Point d'appui de la feuille de partage (macOS : bouton
+    /// « Envoyer à <X> » de l'extension Finder via directive, puis
+    /// sélection d'un destinataire non connecté dans `ShareView`).
+    ///
+    /// - Returns: `true` si l'envoi est parti ou bien programmé.
+    @discardableResult
+    func scheduleTargetedSend(
+        urls: [URL],
+        to peer: Device
+    ) -> Bool {
+        guard !urls.isEmpty else { return false }
+
+        expireScheduledTargetedSendIfStale()
+
+        // Envoi immédiat si la bonne session est déjà sécurisée.
+        if connectionManager.isSecureSessionReady,
+           connectionManager.connectedDevice?.id == peer.id {
+            let accepted = importAndRequestItems(urls: urls)
+            onTargetedSendFinished?(peer.id, accepted)
+            return accepted
+        }
+
+        // Programmation : un seul envoi ciblé à la fois.
+        scheduledTargetedSend = ScheduledTargetedSend(
+            recipientID: peer.id,
+            urls: urls,
+            issuedAt: Date()
+        )
+        scheduledTargetedSendPeerName = peer.name
+        logger.info(
+            "Envoi ciblé programmé vers \(peer.name, privacy: .public) (\(urls.count) fichier(s)) — en attente de session sécurisée"
+        )
+
+        // Lever une éventuelle suspension « déconnexion explicite » :
+        // l'utilisateur demande explicitement une connexion à CE pair.
+        autoConnectSuppressedPeers.remove(peer.id)
+
+        // Tenter la connexion tout de suite si le pair est découvert.
+        if let discovered = bonjourService.discoveredDevices.first(
+            where: { $0.device.id == peer.id }
+        ) {
+            lastAutoConnectAttempts[peer.id] = Date()
+            lastKnownPeerID = peer.id
+            connectionManager.rememberConnectedPeer(peer)
+            connectionManager.connect(to: discovered)
+        }
+
+        return true
+    }
+
+    /// Abandonne l'envoi ciblé programmé (annulation utilisateur).
+    func cancelScheduledTargetedSend() {
+        guard scheduledTargetedSend != nil else { return }
+        scheduledTargetedSend = nil
+        scheduledTargetedSendPeerName = nil
+        logger.info("Envoi ciblé programmé annulé")
+    }
+
+    /// Abandon l'envoi programmé s'il est expiré (appel de propreté à
+    /// chaque redécouverte — la consommation vérifie aussi sa propre
+    /// validité au moment de partir).
+    private func expireScheduledTargetedSendIfStale() {
+        guard let pending = scheduledTargetedSend else { return }
+        guard Date().timeIntervalSince(pending.issuedAt)
+                > Self.targetedSendLifetime else { return }
+
+        scheduledTargetedSend = nil
+        scheduledTargetedSendPeerName = nil
+        logger.warning(
+            "Envoi ciblé programmé expiré (aucune session sécurisée avec le destinataire)"
+        )
+        onTargetedSendFinished?(pending.recipientID, false)
+    }
+
+    /// Consomme l'envoi ciblé programmé quand la session sécurisée avec
+    /// le BON pair est établie. Appelé à chaque installation de clé de
+    /// session — idempotent : sans envoi programmé ou sans
+    /// correspondance d'identifiant, c'est un no-op.
+    private func consumeScheduledTargetedSendIfReady() {
+        expireScheduledTargetedSendIfStale()
+        guard let pending = scheduledTargetedSend else { return }
+        guard connectionManager.isSecureSessionReady,
+              connectionManager.connectedDevice?.id == pending.recipientID
+        else { return }
+
+        scheduledTargetedSend = nil
+        scheduledTargetedSendPeerName = nil
+
+        logger.info(
+            "Session sécurisée avec le destinataire — envoi ciblé déclenché"
+        )
+        let accepted = importAndRequestItems(urls: pending.urls)
+        onTargetedSendFinished?(pending.recipientID, accepted)
+    }
+
+    /// Relance complètement la pile Bonjour (navigateur + écouteur) —
+    /// utilisé par « Relancer la recherche » et les bandeaux d'incident,
+    /// en particulier quand macOS cesse de détecter un appareil déjà
+    /// vu (réveil, bascule réseau, état `.failed` non traité avant).
+    func forceRestartDiscovery() {
+        bonjourService.restartMonitoring()
+    }
+
     func cancelTransfer(
         transferID: UUID
     ) {

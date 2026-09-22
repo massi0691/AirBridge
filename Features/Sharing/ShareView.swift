@@ -174,13 +174,35 @@ struct ShareView: View {
     private func preconditionsBanner(
         viewModel: ShareViewModel
     ) -> some View {
-        if !viewModel.isConnected {
-            banner(
-                icon: "antenna.radiowaves.left.and.right.slash",
-                tint: .orange,
-                title: "Connecte-toi d'abord à un appareil.",
-                subtitle: "Aucun destinataire disponible tant que la session n'est pas ouverte."
-            )
+        if let scheduledName = viewModel.scheduledTargetedSendPeerName {
+            // Envoi programmé vers un appareil pas encore connecté :
+            // la feuille reste ouverte, l'état d'attente est explicite
+            // et l'utilisateur peut annuler.
+            scheduledSendBanner(name: scheduledName, viewModel: viewModel)
+        } else if !viewModel.isConnected {
+            VStack(spacing: AirBridgeDesign.Spacing.sm) {
+                banner(
+                    icon: "antenna.radiowaves.left.and.right.slash",
+                    tint: .orange,
+                    title: "Aucun appareil connecté.",
+                    subtitle: "Sélectionne un appareil découvert (ci-dessous) pour te connecter et envoyer — la connexion s'établit automatiquement."
+                )
+                if viewModel.discoveredDevices.isEmpty {
+                    HStack {
+                        Spacer()
+                        Button {
+                            viewModel.refreshDiscovery()
+                        } label: {
+                            Label(
+                                "Rechercher des appareils",
+                                systemImage: "magnifyingglass"
+                            )
+                        }
+                        .controlSize(.small)
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
         } else if viewModel.attachedURLs.isEmpty {
             banner(
                 icon: "doc.badge.plus",
@@ -189,6 +211,40 @@ struct ShareView: View {
                 subtitle: "Glisse-dépose ou utilise le bouton « Choisir »."
             )
         }
+    }
+
+    /// Bandeau d'envoi programmé : connexion en cours vers le
+    /// destinataire choisi, envoi automatique à la session sécurisée.
+    private func scheduledSendBanner(
+        name: String,
+        viewModel: ShareViewModel
+    ) -> some View {
+        HStack(alignment: .top, spacing: AirBridgeDesign.Spacing.sm) {
+            Image(systemName: "paperplane.badge.clock")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Connexion à \(name)…")
+                    .font(AirBridgeDesign.Typography.callout)
+                Text("Envoi automatique dès que la session est sécurisée.")
+                    .font(AirBridgeDesign.Typography.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Button("Annuler") {
+                viewModel.cancelScheduledSend()
+                Haptics.selection()
+            }
+            .controlSize(.small)
+            .buttonStyle(.bordered)
+        }
+        .padding(AirBridgeDesign.Spacing.sm)
+        .background(
+            RoundedRectangle(
+                cornerRadius: AirBridgeDesign.Radius.medium
+            )
+            .fill(.regularMaterial)
+        )
     }
 
     private func banner(
@@ -247,30 +303,57 @@ struct ShareView: View {
                 }
             )
 
-            Button {
-                if let peer = viewModel.connectedDevice {
-                    handleSend(
-                        to: DiscoveredDevice(
-                            device: peer,
-                            endpoint: dummyEndpoint()
-                        ),
-                        viewModel: viewModel
+            // Envoi en un clic vers le DERNIER appareil connecté,
+            // proposé dès que ce n'est pas le pair courant — c'est
+            // l'action demandée « depuis le menu de partage » (même
+            // affordance dans l'extension Finder), répliquée ici pour
+            // les lots stationnés.
+            if let last = viewModel.lastConnectedDevice,
+               !viewModel.attachedURLs.isEmpty,
+               viewModel.connectedDevice?.id != last.id {
+                Button {
+                    handleSendToLastDevice(viewModel: viewModel)
+                } label: {
+                    Label(
+                        "Envoyer à \(last.name)",
+                        systemImage: "paperplane.fill"
                     )
-                } else {
-                    lastError = .noConnectedDevice
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: AirBridgeDesign.minimumTapTarget
+                    )
+                    .lineLimit(1)
                 }
-            } label: {
-                Label(
-                    "Envoyer",
-                    systemImage: "paperplane.fill"
+                .buttonStyle(.borderedProminent)
+                .help(
+                    "Envoyer vers \(last.name) — connexion automatique puis envoi."
                 )
-                .frame(
-                    maxWidth: .infinity,
-                    minHeight: AirBridgeDesign.minimumTapTarget
-                )
+            } else {
+                Button {
+                    if let peer = viewModel.connectedDevice {
+                        handleSend(
+                            to: DiscoveredDevice(
+                                device: peer,
+                                endpoint: dummyEndpoint()
+                            ),
+                            viewModel: viewModel
+                        )
+                    } else {
+                        lastError = .noConnectedDevice
+                    }
+                } label: {
+                    Label(
+                        "Envoyer",
+                        systemImage: "paperplane.fill"
+                    )
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: AirBridgeDesign.minimumTapTarget
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!viewModel.canShare)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!viewModel.canShare)
         }
     }
 
@@ -314,35 +397,51 @@ struct ShareView: View {
         to device: DiscoveredDevice,
         viewModel: ShareViewModel
     ) {
-        if !viewModel.isConnected {
-            lastError = .noConnectedDevice
-            Haptics.warning()
-            return
-        }
         if viewModel.attachedURLs.isEmpty {
             lastError = .noFiles
             Haptics.warning()
             return
         }
-        if device.id != viewModel.connectedDevice?.id {
-            lastError = .recipientMismatch
+        // Un destinataire NON connecté n'est plus un refus : le
+        // ViewModel déclenche la connexion + l'envoi programmé
+        // (correction « impossible de connecter un appareil depuis
+        // la feuille de partage »).
+        _ = viewModel.send(to: device)
+        deliverSendOutcome(viewModel)
+    }
+
+    /// Envoi en un clic vers le dernier appareil connecté (action
+    /// principale proposée quand ce n'est pas le pair courant).
+    private func handleSendToLastDevice(
+        viewModel: ShareViewModel
+    ) {
+        if viewModel.attachedURLs.isEmpty {
+            lastError = .noFiles
             Haptics.warning()
             return
         }
-        let accepted = viewModel.send(to: device)
-        // The Core signals its pre-condition check through the
-        // return value : a `false` means the request was refused
-        // (peer just dropped, files were already cleared, etc.) —
-        // surface a warning so the user feels the no-op.
-        let outcome = accepted
-        // Quand cette vue est hébergée par la feuille de lot partagé, on
-        // notifie la surface hôte de l'issue RÉELLE de l'envoi — c'est
-        // elle et elle seule qui décide de la vie du lot stationné.
-        // Aucune suppression n'a lieu ici.
-        onSendResult?(outcome)
-        if accepted {
+        _ = viewModel.sendToLastConnectedDevice()
+        deliverSendOutcome(viewModel)
+    }
+
+    /// Traduit `lastSendOutcome` en comportement de la feuille hôte :
+    ///  - `.sentNow`  → `onSendResult(true)` : la feuille se ferme,
+    ///    le Core possède les fichiers ;
+    ///  - `.scheduled`→ aucun `onSendResult(true)` : la feuille reste
+    ///    ouverte, le bandeau d'attente prend le relais ; la fermeture
+    ///    interviendra quand le Core aura réellement importé le lot
+    ///    (via `onTargetedSendFinished`) ;
+    ///  - `.refused`  → `onSendResult(false)` + alerte.
+    private func deliverSendOutcome(_ viewModel: ShareViewModel) {
+        switch viewModel.lastSendOutcome {
+        case .sentNow:
+            onSendResult?(true)
             Haptics.success()
-        } else {
+        case .scheduled:
+            Haptics.impact(.medium)
+        case .refused:
+            onSendResult?(false)
+            lastError = .recipientUnavailable
             Haptics.warning()
         }
     }
@@ -442,6 +541,11 @@ private struct ShareError: Identifiable {
     static let recipientMismatch = ShareError(
         title: "Destinataire indisponible",
         message: "L'appareil sélectionné n'est pas la session active."
+    )
+
+    static let recipientUnavailable = ShareError(
+        title: "Destinataire indisponible",
+        message: "L'appareil sélectionné n'est ni connecté ni découvert. Relance la recherche depuis l'écran Appareils."
     )
 
     static func selectionFailed(

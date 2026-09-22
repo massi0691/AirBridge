@@ -9,6 +9,10 @@ import Foundation
 import Network
 import OSLog
 
+#if os(macOS)
+import AppKit
+#endif
+
 @MainActor
 @Observable
 final class BonjourService {
@@ -29,6 +33,44 @@ final class BonjourService {
 
     private var listener: NWListener?
     private var browser: NWBrowser?
+
+    // MARK: - Résilience de la pile Bonjour (issue « iPhone parfois
+    // non détecté »)
+
+    /// Surveillance du chemin réseau. Un basculement d'interface
+    /// (Wi-Fi ↔ Ethernet, VPN, réveil, réassociation peer-to-peer)
+    /// laisse `NWBrowser`/`NWListener` mordus sur d'anciennes
+    /// adresses : sans redémarrage, la recherche reste « ready »
+    /// silencieusement et le radar ne voit plus jamais l'iPhone.
+    private var pathMonitor: NWPathMonitor?
+
+    /// Signature (noms d'interfaces) du dernier chemin réseau observé.
+    private var lastInterfaceSignature: String = ""
+
+    /// Compteurs de repli après `.failed` (backoff borné) — un
+    /// échec terminal ne laisse plus jamais le service inerte jusqu'au
+    /// redémarrage de l'app.
+    private var browserFailureCount: Int = 0
+    private var listenerFailureCount: Int = 0
+    private var browserRetryTask: Task<Void, Never>?
+    private var listenerRetryTask: Task<Void, Never>?
+
+    /// Observateur macOS du réveil système (token non retiré : le
+    /// `BonjourService` vit aussi longtemps que l'app).
+    private var wakeObserver: NSObjectProtocol?
+
+    /// Backoff de repli Bonjour : 3 s, 6 s, 12 s, 24 s, 48 s, plafonné
+    /// à 60 s. Exposé `nonisolated` pour les tests unitaires.
+    nonisolated static let retryBaseDelay: TimeInterval = 3
+    nonisolated static let retryMaxDelay: TimeInterval = 60
+
+    nonisolated static func retryDelay(afterFailureCount failureCount: Int) -> TimeInterval {
+        let clamped = max(0, failureCount)
+        let multiplier = clamped >= 60
+            ? TimeInterval.greatestFiniteMagnitude
+            : pow(2.0, Double(clamped))
+        return min(retryBaseDelay * multiplier, retryMaxDelay)
+    }
 
     // MARK: - État Bonjour observable (diagnostic)
 
@@ -83,9 +125,21 @@ final class BonjourService {
     /// périmée.
     var onDeviceDiscovered: ((DiscoveredDevice) -> Void)?
 
-    
+    /// Signalé à CHAQUE changement du jeu de résultats Bonjour, avec
+    /// l'ensemble complet des identifiants encore présents (même vide).
+    ///
+    /// C'est la seule source qui voit réellement les DÉPARTS : le
+    /// `onDeviceDiscovered` ci-dessus n'est invoqué que pour les
+    /// appareils présents — quand le dernier pair quitte le réseau, la
+    /// boucle est vide et la levée de suspension d'auto-connexion n'aurait
+    /// jamais lieu. Le cœur consomme ce callback pour mettre à jour la
+    /// présence avant d'évaluer les connexions automatiques.
+    var onDiscoveryResultsChanged: ((Set<UUID>) -> Void)?
+
     init(localDevice: Device){
         self.localDevice = localDevice
+        startPathMonitor()
+        observeSystemWake()
     }
    
     
@@ -205,8 +259,13 @@ final class BonjourService {
                     }
 
                     Task { @MainActor [weak self] in
-                        self?.advertisingIssue = nil
-                        self?.isAdvertisingReady = true
+                        guard let self else { return }
+                        self.advertisingIssue = nil
+                        self.isAdvertisingReady = true
+                        // Succès : le compteur de repli repart à zéro.
+                        self.listenerFailureCount = 0
+                        self.listenerRetryTask?.cancel()
+                        self.listenerRetryTask = nil
                     }
 
                 case .failed(let error):
@@ -219,11 +278,16 @@ final class BonjourService {
                     )
                     let authorizationDenied = Self.isAuthorizationError(error)
                     Task { @MainActor [weak self] in
-                        self?.advertisingIssue = issue
-                        self?.isAdvertisingReady = false
+                        guard let self else { return }
+                        self.advertisingIssue = issue
+                        self.isAdvertisingReady = false
                         if authorizationDenied {
-                            self?.isLocalNetworkAuthorizationDenied = true
+                            self.isLocalNetworkAuthorizationDenied = true
                         }
+                        // Repli symétrique au navigateur : sans relance,
+                        // l'app devenait invisible pour les pairs après
+                        // un échec terminal (changement de réseau, etc.).
+                        self.scheduleListenerRestart()
                     }
 
                 case .cancelled:
@@ -292,9 +356,14 @@ final class BonjourService {
                 Self.staticLogger.info("La recherche Bonjour est prête")
 
                 Task { @MainActor [weak self] in
-                    self?.browsingIssue = nil
-                    self?.isBrowsingReady = true
-                    self?.isLocalNetworkAuthorizationDenied = false
+                    guard let self else { return }
+                    self.browsingIssue = nil
+                    self.isBrowsingReady = true
+                    self.isLocalNetworkAuthorizationDenied = false
+                    // Succès : le compteur de repli repart à zéro.
+                    self.browserFailureCount = 0
+                    self.browserRetryTask?.cancel()
+                    self.browserRetryTask = nil
                 }
 
             case .failed(let error):
@@ -306,11 +375,19 @@ final class BonjourService {
                 )
                 let authorizationDenied = Self.isAuthorizationError(error)
                 Task { @MainActor [weak self] in
-                    self?.browsingIssue = issue
-                    self?.isBrowsingReady = false
+                    guard let self else { return }
+                    self.browsingIssue = issue
+                    self.isBrowsingReady = false
                     if authorizationDenied {
-                        self?.isLocalNetworkAuthorizationDenied = true
+                        self.isLocalNetworkAuthorizationDenied = true
                     }
+                    // Repli : un `.failed` terminal laissait le
+                    // navigateur inerte jusqu'au redémarrage de l'app
+                    // (« l'iPhone n'est plus détecté »). On relance
+                    // avec un backoff borné — y compris après un refus
+                    // d'autorisation : la reprise suivante capte la
+                    // permission accordée entre-temps dans Réglages.
+                    self.scheduleBrowserRestart()
                 }
 
             case .cancelled:
@@ -399,6 +476,14 @@ final class BonjourService {
 
                 self.discoveredDevices = devices
 
+                // Présence AVANT les rappels par appareil : le cœur
+                // observe les départs (y compris jeu vide) pour lever
+                // les suspensions d'auto-connexion — cf. documentation
+                // de `onDiscoveryResultsChanged`.
+                self.onDiscoveryResultsChanged?(
+                    Set(devices.map { $0.device.id })
+                )
+
                 for device in devices {
                     self.onDeviceDiscovered?(device)
                 }
@@ -415,6 +500,9 @@ final class BonjourService {
     
     func stopAdvertising() {
 
+        listenerRetryTask?.cancel()
+        listenerRetryTask = nil
+
         guard listener != nil else {
             logger.info("Aucun service Bonjour à arrêter")
             return
@@ -430,6 +518,9 @@ final class BonjourService {
 
     func stopDiscovery() {
 
+        browserRetryTask?.cancel()
+        browserRetryTask = nil
+
         guard browser != nil else {
             logger.info("Aucune recherche Bonjour à arrêter")
             return
@@ -444,5 +535,153 @@ final class BonjourService {
         logger.info("Recherche Bonjour arrêtée")
 
     }
-    
+
+    // MARK: - Résilience
+
+    /// Relance complète de la pile (navigateur + écouteur) sans vider
+    /// la liste des appareils découverts : le radar conserve ses
+    /// entrées le temps du nouveau browse, qui les remplace.
+    ///
+    /// Point d'appui de l'UI (« Relancer la recherche ») et des
+    /// événements système (changement d'interface, réveil).
+    func restartMonitoring() {
+        logger.info("Redémarrage de la pile Bonjour")
+
+        browserRetryTask?.cancel()
+        browserRetryTask = nil
+        listenerRetryTask?.cancel()
+        listenerRetryTask = nil
+        browserFailureCount = 0
+        listenerFailureCount = 0
+
+        browser?.cancel()
+        browser = nil
+        isBrowsingReady = false
+
+        listener?.cancel()
+        listener = nil
+        isAdvertisingReady = false
+
+        // Les deux redémarrages sont asynchrones (état `.ready`) mais
+        // `start*` peut être rappelé immédiatement : le NWListener /
+        // NWBrowser sont des objets neufs, aucun état résiduel.
+        startDiscovery()
+        startAdvertising()
+    }
+
+    /// Planifie un redémarrage du navigateur après un `.failed`, avec
+    /// backoff borné. Une seule tâche à la fois.
+    private func scheduleBrowserRestart() {
+        browserRetryTask?.cancel()
+
+        let delay = Self.retryDelay(
+            afterFailureCount: browserFailureCount
+        )
+        browserFailureCount += 1
+
+        logger.warning(
+            "Reprise de la recherche dans \(Int(delay)) s (échec #\(self.browserFailureCount))"
+        )
+
+        browserRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(delay * 1_000_000_000)
+            )
+            guard !Task.isCancelled, let self else { return }
+            self.browser?.cancel()
+            self.browser = nil
+            self.isBrowsingReady = false
+            self.startDiscovery()
+        }
+    }
+
+    /// Planifie un redémarrage de l'écouteur après un `.failed`.
+    private func scheduleListenerRestart() {
+        listenerRetryTask?.cancel()
+
+        let delay = Self.retryDelay(
+            afterFailureCount: listenerFailureCount
+        )
+        listenerFailureCount += 1
+
+        logger.warning(
+            "Reprise de la publication dans \(Int(delay)) s (échec #\(self.listenerFailureCount))"
+        )
+
+        listenerRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(delay * 1_000_000_000)
+            )
+            guard !Task.isCancelled, let self else { return }
+            self.listener?.cancel()
+            self.listener = nil
+            self.isAdvertisingReady = false
+            self.startAdvertising()
+        }
+    }
+
+    // MARK: - Chemin réseau + réveil
+
+    /// Démarre la surveillance du chemin réseau (une seule fois).
+    private func startPathMonitor() {
+        guard pathMonitor == nil else { return }
+
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let signature = path.availableInterfaces
+                .map { String(describing: $0) }
+                .sorted()
+                .joined(separator: ",")
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let previous = self.lastInterfaceSignature
+                self.lastInterfaceSignature = signature
+
+                // Premier état : aucune reprise à déclencher (le
+                // démarrage initial arrive juste après).
+                guard !previous.isEmpty, previous != signature else {
+                    return
+                }
+
+                self.logger.info(
+                    "Chemin réseau modifié — relance de la découverte"
+                )
+                self.restartMonitoring()
+            }
+        }
+        monitor.start(queue: .main)
+        pathMonitor = monitor
+    }
+
+    #if os(macOS)
+    /// Observer le réveil système : après un veille/réveil, les mises
+    /// en cache mDNS peuvent être périmées alors que l'état reste
+    /// `.ready` — un redémarrage forcé re-synchronise la publication
+    /// et la recherche (cause classique de « l'iPhone n'est plus
+    /// détecté » au réveil).
+    private func observeSystemWake() {
+        guard wakeObserver == nil else { return }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.logger.info(
+                    "Réveil système — relance de la découverte"
+                )
+                self.restartMonitoring()
+            }
+        }
+    }
+    #else
+    private func observeSystemWake() {
+        // iOS : pas de réveil système comparable ; le moniteur de
+        // chemin réseau couvre les bascules d'association (Wi-Fi
+        // coupé/rétabli).
+    }
+    #endif
+
 }

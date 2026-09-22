@@ -61,6 +61,24 @@ public enum AirBridgeURLScheme {
         return url
     }
 
+    /// Variante avec destinataire : l'extension Finder signale à
+    /// l'application principale qu'un envoi ciblé a été demandé
+    /// (« Envoyer à <dernier appareil> »). La directive associée
+    /// voyage par l'App Group (`AirBridgeSendDirective`) — ce paramètre
+    /// n'en transporte que l'identifiant, jamais le choix lui-même
+    /// (l'app revalide la cible contre sa session réelle).
+    /// - Parameters:
+    ///   - batchID: UUID du lot écrit dans `PendingShares/`.
+    ///   - peerID: identifiant du pair destinataire.
+    /// - Returns: URL `airbridge://receive?batch=<id>&send=<peerID>`.
+    public static func makeReceiveURL(batchID: String, sendTo peerID: UUID) -> URL? {
+        guard let encoded = batchID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "\(scheme)://\(receiveHost)?batch=\(encoded)&send=\(peerID.uuidString)") else {
+            return nil
+        }
+        return url
+    }
+
     /// Parse une URL airbridge:// pour extraire les fichiers.
     /// - Parameter url: URL à parser.
     /// - Returns: Liste des URLs de fichiers, ou nil si le format est invalide.
