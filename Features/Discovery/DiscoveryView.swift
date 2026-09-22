@@ -289,7 +289,10 @@ struct DiscoveryView: View {
 
             if isConnected {
                 Button(role: .destructive) {
-                    core.connectionManager.disconnect()
+                    // Passe par le Core : une déconnexion manuelle suspend
+                    // la connexion automatique vers ce pair (sinon le
+                    // prochain événement Bonjour reconnecterait aussitôt).
+                    core.disconnectFromPeer()
                 } label: {
                     Label(
                         actionLabelWidth == .compact ? "Déco" : "Déconnecter",

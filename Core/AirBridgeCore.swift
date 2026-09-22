@@ -107,6 +107,37 @@ final class AirBridgeCore {
     /// session puisse en rouvrir une.
     private var isResumeCampaignActive = false
 
+    // MARK: - Connexion automatique des pairs de confiance
+
+    /// Dernière tentative de connexion automatique par pair.
+    ///
+    /// Bonjour redéclenche `onDeviceDiscovered` pour TOUS les appareils à
+    /// chaque changement du jeu de résultats (et ces changements sont
+    /// fréquents : TXT records, interfaces réseau…) : sans anti-rafale,
+    /// chaque événement relancerait une tentative de connexion. Une seule
+    /// tentative par pair et par fenêtre `autoConnectMinInterval`.
+    private var lastAutoConnectAttempts: [UUID: Date] = [:]
+
+    /// Intervalle minimal entre deux tentatives de connexion automatique
+    /// vers un même pair. Une session qui tombe « consomme » la tentative
+    /// (elle est retirée du registre dans `onSessionClosed`) : la
+    /// reconnexion peut alors repartir dès la redécouverte suivante.
+    private static let autoConnectMinInterval: TimeInterval = 15
+
+    /// Pairs dont la connexion automatique est suspendue suite à une
+    /// déconnexion EXPLICITE de l'utilisateur. La suspension est levée
+    /// quand le pair quitte le réseau (il disparaît de la découverte) puis
+    /// y revient, ou quand l'utilisateur se reconnecte manuellement —
+    /// une déconnexion volontaire ne doit jamais être immédiatement
+    /// annulée par la redécouverte, mais elle ne doit pas non plus être
+    /// définitive.
+    private var autoConnectSuppressedPeers: Set<UUID> = []
+
+    /// Pairs vus au dernier événement de découverte. Permet de détecter
+    /// les sorties du réseau (pair absent du nouveau jeu de résultats)
+    /// pour lever la suspension de connexion automatique à son retour.
+    private var previouslyDiscoveredPeerIDs: Set<UUID> = []
+
     // MARK: - Délais de sécurité (jamais d'attente infinie)
 
     /// Délai accordé à un envoi **accepté par le pair** mais dont le
@@ -1973,25 +2004,7 @@ final class AirBridgeCore {
         // qu'attendre la session — jamais une vieille adresse n'est rejetée
         // aveuglément, seule l'endpoint fraîche sert.
         bonjourService.onDeviceDiscovered = { [weak self] discovered in
-            guard let self else { return }
-            guard self.connectionManager.session == nil else { return }
-
-            let device = discovered.device
-
-            let hasInterruptedForPeer = self.transferManager.transfers.contains {
-                $0.state == .interrupted && $0.peer.id == device.id
-            }
-
-            guard hasInterruptedForPeer else { return }
-
-            logger.info("Pair redécouvert avec reprises en attente : \(device.name, privacy: .public)")
-            self.lastKnownPeerID = device.id
-            self.connectionManager.rememberConnectedPeer(device)
-            // La redécouverte fournit une endpoint fraîche : c'est la seule
-            // porte de sortie après une campagne invalidée par un échec. La
-            // campagne elle-même ne s'ouvrira qu'à la confirmation `.ready`
-            // (via `onSessionReady`), avec une seule tâche par transfert.
-            self.connectionManager.connect(to: discovered)
+            self?.handleDeviceDiscovered(discovered)
         }
 
         connectionManager.onSessionReady = { [weak self] connection in
@@ -2197,6 +2210,18 @@ final class AirBridgeCore {
             // 6. Seulement maintenant : oublier le pair, la séquence de
             // déconnexion est terminée.
             self.connectionManager.clearLastConnectedPeer()
+
+            // 7. La session tombée « consomme » la tentative de connexion
+            // automatique associée au pair : la prochaine redécouverte
+            // pourra reconnecter (pair de confiance ou reprises en attente)
+            // sans attendre la fenêtre d'anti-rafale. Pour une déconnexion
+            // explicite, la suspension posée par `disconnectFromPeer`
+            // bloque de toute façon la reconnexion.
+            if let identifiedPeer {
+                self.lastAutoConnectAttempts.removeValue(
+                    forKey: identifiedPeer.id
+                )
+            }
 
             // Le drapeau est baissé ici plutôt qu'à `onSessionReady` :
             // une seconde déconnexion peut survenir avant toute
@@ -3789,6 +3814,126 @@ final class AirBridgeCore {
         connectionManager.disconnect()
         bonjourService.stopDiscovery()
         bonjourService.stopAdvertising()
+    }
+
+    // MARK: - Connexion automatique des pairs de confiance
+
+    /// Redécouverte Bonjour d'un appareil : décide s'il faut ouvrir une
+    /// connexion automatiquement.
+    ///
+    /// Deux motifs de connexion automatique :
+    ///  1. des transferts interrompus attendent une reprise vers ce pair
+    ///     (comportement historique : la redécouverte fournit la seule
+    ///     endpoint fraîche après une coupure) ;
+    ///  2. le pair est **de confiance** (pairage confirmé) : la connexion
+    ///     s'établit toute seule, comme promis à l'utilisateur au moment
+    ///     du pairage (« Faire confiance permettra à cet appareil de se
+    ///     reconnecter automatiquement »).
+    ///
+    /// Garde-fous : aucune connexion si une session est déjà active, si le
+    /// pair est bloqué, si l'utilisateur vient de se déconnecter
+    /// explicitement de ce pair, et au plus une tentative par pair et par
+    /// fenêtre `autoConnectMinInterval` (Bonjour redéclenche cet événement
+    /// très fréquemment).
+    private func handleDeviceDiscovered(
+        _ discovered: DiscoveredDevice
+    ) {
+        let device = discovered.device
+
+        // Présence : un pair qui disparaît des résultats puis revient est
+        // considéré comme « nouveau » — la suspension d'une déconnexion
+        // volontaire est levée à son retour.
+        refreshDiscoveredPeerPresence()
+
+        guard connectionManager.session == nil else { return }
+
+        let hasInterruptedForPeer = transferManager.transfers.contains {
+            $0.state == .interrupted && $0.peer.id == device.id
+        }
+
+        let isTrustedPeer = pairingStore.isTrusted(device.id)
+
+        guard hasInterruptedForPeer || isTrustedPeer else { return }
+
+        // Un pair bloqué ne doit jamais être connecté automatiquement
+        // (ni manuellement d'ailleurs, mais la découverte ne connaît pas
+        // l'intention de l'utilisateur : on filtre ici).
+        guard !pairingStore.isBlocked(device.id) else { return }
+
+        // Déconnexion explicite encore en vigueur pour ce pair.
+        guard !autoConnectSuppressedPeers.contains(device.id) else { return }
+
+        // Anti-rafale : une seule tentative par pair et par fenêtre.
+        let now = Date()
+        if let lastAttempt = lastAutoConnectAttempts[device.id],
+           now.timeIntervalSince(lastAttempt) < Self.autoConnectMinInterval {
+            return
+        }
+        lastAutoConnectAttempts[device.id] = now
+
+        if hasInterruptedForPeer {
+            logger.info("Pair redécouvert avec reprises en attente : \(device.name, privacy: .public)")
+        } else {
+            logger.info("Pair de confiance redécouvert : connexion automatique vers \(device.name, privacy: .public)")
+        }
+
+        lastKnownPeerID = device.id
+        connectionManager.rememberConnectedPeer(device)
+        // La redécouverte fournit une endpoint fraîche : c'est la seule
+        // porte de sortie après une campagne invalidée par un échec. La
+        // campagne elle-même ne s'ouvrira qu'à la confirmation `.ready`
+        // (via `onSessionReady`), avec une seule tâche par transfert.
+        connectionManager.connect(to: discovered)
+    }
+
+    /// Met à jour l'ensemble des pairs actuellement découverts et lève la
+    /// suspension de connexion automatique des pairs qui avaient quitté le
+    /// réseau (ils ne sont plus dans les résultats Bonjour).
+    ///
+    /// Appelé à chaque événement de découverte ; idempotent quand le jeu
+    /// de résultats ne change pas (Bonjour redéclenche pourtant l'événement
+    /// pour tous les appareils à chaque changement).
+    private func refreshDiscoveredPeerPresence() {
+        let current = Set(
+            bonjourService.discoveredDevices.map { $0.device.id }
+        )
+
+        let disappeared = previouslyDiscoveredPeerIDs.subtracting(current)
+
+        if !disappeared.isEmpty {
+            autoConnectSuppressedPeers.subtract(disappeared)
+            for peerID in disappeared {
+                lastAutoConnectAttempts.removeValue(forKey: peerID)
+            }
+        }
+
+        previouslyDiscoveredPeerIDs = current
+    }
+
+    /// Connexion demandée explicitement par l'utilisateur (radar, liste
+    /// d'appareils).
+    ///
+    /// Lève la suspension de connexion automatique vers ce pair : une
+    /// reconnexion manuelle après une déconnexion volontaire rétablit le
+    /// comportement automatique pour la suite.
+    func connect(to discovered: DiscoveredDevice) {
+        autoConnectSuppressedPeers.remove(discovered.device.id)
+        connectionManager.connect(to: discovered)
+    }
+
+    /// Déconnexion demandée explicitement par l'utilisateur.
+    ///
+    /// Suspend la connexion automatique vers le pair concerné : sans cela,
+    /// le prochain événement Bonjour (ils sont fréquents) reconnecterait
+    /// immédiatement l'appareil que l'utilisateur vient juste de
+    /// déconnecter. La suspension est levée au retour du pair sur le
+    /// réseau ou à la prochaine connexion manuelle.
+    func disconnectFromPeer() {
+        if let peer = connectionManager.connectedDevice
+            ?? connectionManager.lastConnectedPeer {
+            autoConnectSuppressedPeers.insert(peer.id)
+        }
+        connectionManager.disconnect()
     }
     
     

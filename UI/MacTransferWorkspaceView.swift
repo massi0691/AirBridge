@@ -101,6 +101,15 @@ struct MacTransferWorkspaceView: View {
     @State private var isImporterPresented = false
     @State private var presentedRequest: TransferRequestPresentation?
 
+    // MARK: - Sélection multiple (Historique)
+
+    /// Identifiants des entrées d'historique sélectionnées dans le
+    /// tableau (filtre « Historique » uniquement).
+    @State private var historySelection: Set<UUID> = []
+    /// Popup de confirmation « Voulez-vous supprimer tout
+    /// l'historique ? ».
+    @State private var isConfirmingClearHistory = false
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -130,7 +139,44 @@ struct MacTransferWorkspaceView: View {
                     }
                     .help("Relancer la recherche d'appareils")
                 }
+
+                if effectiveFilter == .history {
+                    // Suppression groupée des entrées cochées dans le
+                    // tableau (sélection native macOS : clic ⌘ / ⇧).
+                    Button(role: .destructive) {
+                        deleteSelectedHistory()
+                    } label: {
+                        Label(
+                            selectedHistoryCount == 0
+                                ? "Supprimer la sélection"
+                                : "Supprimer (\(selectedHistoryCount))",
+                            systemImage: "trash"
+                        )
+                    }
+                    .disabled(selectedHistoryCount == 0)
+                    .help("Supprimer les entrées sélectionnées de l’historique")
+
+                    Button(role: .destructive) {
+                        isConfirmingClearHistory = true
+                    } label: {
+                        Label("Vider l’historique", systemImage: "trash.slash")
+                    }
+                    .disabled(viewModel?.history.isEmpty ?? true)
+                    .help("Supprimer tout l’historique")
+                }
             }
+        }
+        .alert(
+            "Voulez-vous supprimer tout l’historique ?",
+            isPresented: $isConfirmingClearHistory
+        ) {
+            Button("Supprimer", role: .destructive) {
+                viewModel?.clearHistory()
+                historySelection.removeAll()
+            }
+            Button("Annuler", role: .cancel) { }
+        } message: {
+            Text("Cette action est irréversible.")
         }
         .frame(minWidth: 900, minHeight: 600)
         .sheet(item: $presentedRequest) { _ in
@@ -145,6 +191,11 @@ struct MacTransferWorkspaceView: View {
         }
         .onChange(of: core.pendingTransferBatch?.id, initial: true) { _, newValue in
             synchronizeRequestSheet(batchID: newValue)
+        }
+        .onChange(of: effectiveFilter) { _, _ in
+            // Changer de filtre vide la sélection d'historique : elle ne
+            // concerne que le tableau « Historique ».
+            historySelection.removeAll()
         }
         .task {
             if viewModel == nil {
@@ -457,7 +508,10 @@ struct MacTransferWorkspaceView: View {
     // MARK: - Table
 
     private var transferTable: some View {
-        Table(rows) {
+        // Sélection native du tableau (clic ⌘ / ⇧) — active uniquement sur
+        // le filtre « Historique » ; sur les autres filtres le binding est
+        // inerte pour ne pas laisser croire à une sélection actionnable.
+        Table(rows, selection: tableSelectionBinding) {
             TableColumn("Fichier") { row in
                 HStack(spacing: 8) {
                     Image(systemName: "doc.fill")
@@ -521,6 +575,13 @@ struct MacTransferWorkspaceView: View {
             .width(min: 60, ideal: 70)
         }
         .tableStyle(.inset)
+        .onDeleteCommand {
+            // Touche Suppr : équivalent clavier du bouton « Supprimer la
+            // sélection » (uniquement en mode Historique).
+            if effectiveFilter == .history {
+                deleteSelectedHistory()
+            }
+        }
         .overlay {
             if rows.isEmpty {
                 ContentUnavailableView {
@@ -597,6 +658,43 @@ struct MacTransferWorkspaceView: View {
         return models
             .sorted { ($0.startDate ?? .distantPast) > ($1.startDate ?? .distantPast) }
             .map(Self.row(for:))
+    }
+
+    // MARK: - Sélection multiple (Historique)
+
+    /// Binding de sélection du tableau : actif uniquement sur le filtre
+    /// « Historique ». Sur les autres filtres, la lecture renvoie un
+    /// ensemble vide et l'écriture est ignorée — la sélection native du
+    /// tableau reste disponible visuellement mais sans effet.
+    private var tableSelectionBinding: Binding<Set<UUID>> {
+        Binding(
+            get: { effectiveFilter == .history ? historySelection : [] },
+            set: { newValue in
+                if effectiveFilter == .history {
+                    historySelection = newValue
+                }
+            }
+        )
+    }
+
+    /// Nombre d'entrées sélectionnées ET encore présentes dans
+    /// l'historique (un id périmé — entrée supprimée ailleurs — ne doit
+    /// ni compter dans le libellé du bouton, ni bloquer son état).
+    private var selectedHistoryCount: Int {
+        guard let viewModel else { return 0 }
+        let currentIDs = Set(viewModel.historyUI().map(\.id))
+        return historySelection.intersection(currentIDs).count
+    }
+
+    /// Supprime les entrées sélectionnées de l'historique.
+    private func deleteSelectedHistory() {
+        guard let viewModel, effectiveFilter == .history else { return }
+        let currentIDs = Set(viewModel.historyUI().map(\.id))
+        let idsToDelete = historySelection.intersection(currentIDs)
+        historySelection.removeAll()
+        guard !idsToDelete.isEmpty else { return }
+        viewModel.removeFromHistory(entryIDs: idsToDelete)
+        Haptics.warning()
     }
 
     private func badgeCount(for item: MacTransferFilter) -> Int {
