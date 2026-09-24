@@ -71,6 +71,17 @@ struct DiscoveryView: View {
     @ViewBuilder
     private func content(viewModel: DiscoveryViewModel) -> some View {
         VStack(spacing: AirBridgeDesign.Spacing.md) {
+            // Incident Bonjour (refus « Réseau local », publication
+            // impossible…) : affiché AVANT le radar, car il en explique
+            // le vide. Sans ce bandeau, un refus d'autorisation
+            // (`PolicyDenied`) laissait la recherche tourner à l'infini
+            // sans jamais rien dire à l'utilisateur.
+            if let issue = viewModel.localNetworkIssue {
+                LocalNetworkIssueBanner(message: issue) {
+                    core.forceRestartDiscovery()
+                }
+            }
+
             radarSection(viewModel: viewModel)
                 .frame(maxWidth: .infinity)
                 .frame(height: 340)
@@ -90,7 +101,7 @@ struct DiscoveryView: View {
                 .fill(.regularMaterial)
 
             if viewModel.discoveredDevices.isEmpty {
-                radarEmptyState
+                radarEmptyState(viewModel: viewModel)
             } else {
                 RadarView(
                     localDevice: viewModel.localDevice,
@@ -123,15 +134,33 @@ struct DiscoveryView: View {
         return "\(viewModel.discoveredDevices.count)|\(ids)"
     }
 
-    private var radarEmptyState: some View {
+    /// État vide du radar.
+    ///
+    /// Deux cas très différents, qu'il ne faut pas confondre :
+    ///  • **autorisation refusée** — la recherche ne peut pas
+    ///    fonctionner, le dire explicitement (« accès refusé ») plutôt
+    ///    que laisser croire à une recherche en cours ;
+    ///  • **autorisée mais rien trouvé** — consigne habituelle
+    ///    (ouvrir AirBridge sur l'autre appareil).
+    private func radarEmptyState(viewModel: DiscoveryViewModel) -> some View {
         VStack(spacing: AirBridgeDesign.Spacing.sm) {
-            Image(systemName: "antenna.radiowaves.left.and.right")
+            Image(systemName: viewModel.isLocalNetworkDenied
+                  ? "wifi.slash"
+                  : "antenna.radiowaves.left.and.right")
                 .font(.system(size: 36, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("Recherche d'appareils…")
+                .foregroundStyle(viewModel.isLocalNetworkDenied
+                                 ? AirBridgeDesign.Color.warning
+                                 : Color.secondary)
+
+            Text(viewModel.isLocalNetworkDenied
+                 ? "Accès au réseau local refusé"
+                 : "Recherche d'appareils…")
                 .font(AirBridgeDesign.Typography.callout)
                 .foregroundStyle(.secondary)
-            Text("Lance AirBridge sur un autre appareil connecté au même réseau.")
+
+            Text(viewModel.isLocalNetworkDenied
+                 ? "Autorise « Réseau local » pour AirBridge, puis relance la recherche."
+                 : "Lance AirBridge sur un autre appareil connecté au même réseau.")
                 .font(AirBridgeDesign.Typography.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

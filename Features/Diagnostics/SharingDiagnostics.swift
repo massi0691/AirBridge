@@ -228,8 +228,15 @@ nonisolated enum SharingDiagnosticsBuilder {
                 destination = "Réglages Système → Confidentialité et sécurité "
                     + "→ Réseau local → activez AirBridge."
             case .iOS:
-                destination = "Réglages → Confidentialité et sécurité → "
-                    + "Réseau local → activez AirBridge."
+                // L'interrupteur existe aussi sur la page de
+                // l'application (Réglages → AirBridge → Réseau local) :
+                // c'est le chemin le plus court, mentionné en premier.
+                destination = "Réglages → AirBridge → Réseau local → "
+                    + "activez l’accès (liste complète : Réglages → "
+                    + "Confidentialité et sécurité → Réseau local). Si "
+                    + "l’interrupteur n’apparaît pas, désinstallez puis "
+                    + "réinstallez l’application : iOS ne le crée qu’après "
+                    + "une première demande."
             case .other:
                 destination = "Autorisez l’accès au réseau local pour AirBridge."
             }
@@ -481,7 +488,11 @@ nonisolated enum SharingDiagnosticsBuilder {
                 status: .unchecked,
                 remediation: "Sur la borne Wi-Fi, désactivez l’isolation des "
                     + "clients (AP isolation) et autorisez mDNS/Bonjour. "
-                    + "Évitez les réseaux invités et les VPN actifs."
+                    + "Évitez les réseaux invités et les VPN actifs. Sur le "
+                    + "Wi-Fi utilisé, désactivez aussi « Adresse Wi-Fi "
+                    + "privée » / « Limiter le suivi des adresses IP » et le "
+                    + "Relais privé iCloud : les deux font échouer Bonjour "
+                    + "en PolicyDenied même quand l’app est autorisée."
             )
 
         case .other:
@@ -519,13 +530,18 @@ nonisolated enum SharingDiagnosticsBuilder {
                 id: "share-menu",
                 title: "Menu Partager",
                 detail: "L’extension \(expected) est embarquée, mais le "
-                    + "conteneur partagé (group.com.airbridge.shared) est "
-                    + "indisponible : les fichiers partagés ne peuvent pas "
-                    + "être remis à l’application.",
+                    + "conteneur partagé (\(PendingShareController.appGroupIdentifier)) "
+                    + "est indisponible : les fichiers partagés ne peuvent "
+                    + "pas être remis à l’application. Le journal système "
+                    + "« client is not entitled » confirme ce cas.",
                 status: .failure,
-                remediation: "Vérifiez l’App Group dans les capacités des "
-                    + "cibles AirBridge et \(expected), puis réinstallez "
-                    + "l’application."
+                remediation: "Le profil de provisionnement ne porte pas la "
+                    + "capacité App Groups : activez-la sur l’App ID puis "
+                    + "dans Signing & Capabilities des cibles AirBridge et "
+                    + "\(expected) (compte développeur payant — les comptes "
+                    + "gratuits n’y ont pas droit), et réinstallez. Les "
+                    + "transferts entre deux AirBridge restent possibles : "
+                    + "seul le passage par le menu Partager est indisponible."
             )
         }
 

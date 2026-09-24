@@ -48,6 +48,25 @@ final class DiscoveryViewModel {
         connectedDevice != nil
     }
 
+    /// Incident Bonjour en cours (autorisation « Réseau local » refusée,
+    /// publication impossible, réseau indisponible…), `nil` quand la
+    /// pile fonctionne.
+    ///
+    /// Remonté ici pour que l'écran de découverte puisse afficher un
+    /// bandeau explicatif : un refus d'autorisation ne se voit
+    /// autrement que par un radar vide, sans cause ni action
+    /// accessibles.
+    var localNetworkIssue: String? {
+        core.bonjourService.localNetworkIssue
+    }
+
+    /// Vrai quand le système refuse l'accès au réseau local : dans ce
+    /// cas ni la découverte ni la réception ne peuvent aboutir, et
+    /// l'état vide du radar doit le dire explicitement.
+    var isLocalNetworkDenied: Bool {
+        core.bonjourService.isLocalNetworkAuthorizationDenied
+    }
+
     func isConnected(_ device: Device) -> Bool {
         connectedDevice?.id == device.id
     }

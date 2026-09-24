@@ -60,6 +60,11 @@ final class PendingShareController {
     /// Lot actuellement affiché dans la feuille d'envoi.
     private(set) var item: PendingShareItem?
 
+    /// Garde-fou de journalisation : l'absence de conteneur App Group
+    /// est un état durable, pas un incident à répéter à chaque
+    /// balayage.
+    private var didReportMissingContainer = false
+
     /// Signatures déjà présentées. Un lot n'est présenté qu'une fois :
     /// toute remise redondante (URL scheme + notification Darwin +
     /// balayage) est ignorée, donc un envoi ne peut jamais être déclenché
@@ -212,11 +217,22 @@ final class PendingShareController {
     ) -> PendingSharePruneResult {
         var result = PendingSharePruneResult()
 
-        let container = containerURL ?? fileManager.containerURL(
-            forSecurityApplicationGroupIdentifier: Self.appGroupIdentifier
-        )
+        let container = containerURL ?? AirBridgeAppGroup.containerURL()
         guard let container else {
-            logger.error("Purge impossible : conteneur App Group indisponible")
+            // Conteneur indisponible = capacité App Groups non
+            // provisionnée (compte gratuit, App Group absent de
+            // l'App ID) : l'extension ne peut pas écrire de lot, donc
+            // il n'y a rien à purger. Ce n'est PAS une erreur de
+            // nettoyage — le message passe en `notice` et une seule
+            // fois par exécution, sinon chaque retour au premier plan
+            // ajoutait une ligne d'erreur (et deux appels système
+            // journalisant « client is not entitled »).
+            if !didReportMissingContainer {
+                didReportMissingContainer = true
+                logger.notice(
+                    "Conteneur App Group indisponible : partage depuis l'extension inactif (aucun lot à purger)"
+                )
+            }
             return result
         }
 

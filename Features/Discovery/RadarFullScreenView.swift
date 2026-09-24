@@ -166,6 +166,18 @@ struct RadarFullScreenView: View {
                         .padding(.top, headerTopPadding)
                         .padding(.horizontal, horizontalPadding)
 
+                    // Incident Bonjour (refus « Réseau local »…). Sans
+                    // ce bandeau, un refus d'autorisation
+                    // (`PolicyDenied(-65570)`) laissait le radar tourner
+                    // à l'infini : aucune explication, aucune action.
+                    if let issue = viewModel.localNetworkIssue {
+                        LocalNetworkIssueBanner(message: issue) {
+                            core.forceRestartDiscovery()
+                        }
+                        .padding(.top, AirBridgeDesign.Spacing.sm)
+                        .padding(.horizontal, horizontalPadding)
+                    }
+
                     Spacer()
                         .frame(height: 8)
 
@@ -332,6 +344,11 @@ struct RadarFullScreenView: View {
             return "Connecté à \(peer.name)"
         } else if connectionState == .connecting {
             return "Connexion en cours..."
+        } else if viewModel.isLocalNetworkDenied {
+            // L'autorisation refusée prime sur « recherche en cours » :
+            // annoncer une recherche qui ne peut pas aboutir est
+            // exactement ce qui rendait la panne incompréhensible.
+            return "Accès au réseau local refusé"
         } else if viewModel.discoveredDevices.isEmpty {
             return "Recherche d'appareils..."
         } else {
@@ -345,7 +362,7 @@ struct RadarFullScreenView: View {
     private func radarSection(viewModel: DiscoveryViewModel) -> some View {
         ZStack {
             if viewModel.discoveredDevices.isEmpty {
-                radarEmptyState
+                radarEmptyState(viewModel: viewModel)
             } else {
                 RadarView(
                     localDevice: viewModel.localDevice,
@@ -379,31 +396,46 @@ struct RadarFullScreenView: View {
         }
     }
 
-    private var radarEmptyState: some View {
+    /// État vide du radar.
+    ///
+    /// Quand l'accès au réseau local est refusé, la recherche ne
+    /// tourne pas : le dire (icône barrée, pas de pulsation) plutôt
+    /// que d'entretenir l'illusion d'une recherche en cours.
+    private func radarEmptyState(viewModel: DiscoveryViewModel) -> some View {
         VStack(spacing: AirBridgeDesign.Spacing.lg) {
-            // Animation pulse sur l'icône
+            // Animation pulse sur l'icône — figée quand la recherche est
+            // impossible : une pulsation qui ne mène à rien est un
+            // mensonge visuel.
             ZStack {
                 Circle()
                     .fill(Color.accentColor.opacity(0.2))
                     .frame(width: 120, height: 120)
-                    .scaleEffect(isRadarActive ? 1.2 : 1.0)
-                    .opacity(isRadarActive ? 0.0 : 0.4)
+                    .scaleEffect(isRadarActive && !viewModel.isLocalNetworkDenied ? 1.2 : 1.0)
+                    .opacity(isRadarActive && !viewModel.isLocalNetworkDenied ? 0.0 : 0.4)
                     .animation(
                         .easeInOut(duration: 1.5).repeatForever(autoreverses: false),
                         value: isRadarActive
                     )
 
-                Image(systemName: "antenna.radiowaves.left.and.right")
+                Image(systemName: viewModel.isLocalNetworkDenied
+                      ? "wifi.slash"
+                      : "antenna.radiowaves.left.and.right")
                     .font(.system(size: 48, weight: .light))
-                    .foregroundStyle(AirBridgeDesign.Color.Radar.title)
+                    .foregroundStyle(viewModel.isLocalNetworkDenied
+                                     ? AirBridgeDesign.Color.warning
+                                     : AirBridgeDesign.Color.Radar.title)
             }
 
             VStack(spacing: AirBridgeDesign.Spacing.sm) {
-                Text("En attente d'appareils...")
+                Text(viewModel.isLocalNetworkDenied
+                     ? "Réseau local refusé"
+                     : "En attente d'appareils...")
                     .font(AirBridgeDesign.Typography.title3)
                     .foregroundStyle(AirBridgeDesign.Color.Radar.title)
 
-                Text("Lance AirBridge sur un autre appareil\nconnecté au même réseau.")
+                Text(viewModel.isLocalNetworkDenied
+                     ? "Autorise « Réseau local » pour AirBridge\ndans Réglages, puis relance la recherche."
+                     : "Lance AirBridge sur un autre appareil\nconnecté au même réseau.")
                     .font(AirBridgeDesign.Typography.callout)
                     .foregroundStyle(AirBridgeDesign.Color.Radar.subtitle)
                     .multilineTextAlignment(.center)
