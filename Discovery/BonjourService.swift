@@ -158,33 +158,104 @@ final class BonjourService {
 
     // MARK: - Diagnostic réseau local
 
+    /// `kDNSServiceErr_PolicyDenied` — le code que remontent
+    /// réellement iOS 14+ / macOS 15+ quand l'application n'a pas
+    /// l'accès au réseau local. C'est lui qui apparaît dans les
+    /// journaux système :
+    /// `nw_browser_fail_on_dns_error_locked [B1] … PolicyDenied(-65570)`
+    /// et `-[_NWAdvertiser …] advertising denied by policy`.
+    ///
+    /// Il était absent de la détection : le refus le plus fréquent
+    /// n'était donc **jamais** identifié — radar vide sans bandeau,
+    /// diagnostic annonçant « aucun refus signalé ».
+    nonisolated static let policyDeniedCode = -65570
+
+    /// `kDNSServiceErr_NoAuth` — variante documentée historiquement.
+    nonisolated static let noAuthCode = -65555
+
+    /// Même refus exprimé dans le domaine d'erreurs `NSNetServices`
+    /// (remonté notamment par `NetService` et les API de plus haut
+    /// niveau).
+    nonisolated static let netServicesPolicyDeniedCode = -72008
+
+    /// Vrai pour un code DNS qui trahit un REFUS d'autorisation du
+    /// réseau local (et non une panne réseau transitoire) : le
+    /// navigateur n'émet alors aucun résultat tant que l'autorisation
+    /// n'est pas accordée.
+    ///
+    /// Exposé `nonisolated static` (et non `private`) : les tests
+    /// verrouillent la liste des codes, seul endroit où un oubli se
+    /// paie d'un radar vide inexpliqué.
+    nonisolated static func isAuthorizationDenied(dnsCode: Int) -> Bool {
+        dnsCode == policyDeniedCode
+            || dnsCode == noAuthCode
+            || dnsCode == netServicesPolicyDeniedCode
+    }
+
     /// Vrai pour les erreurs Bonjour qui signalent un refus
     /// d'autorisation plutôt qu'un incident réseau transitoire.
-    ///
-    /// `kDNSServiceErr_NoAuth` (-65555) est le code remonté quand
-    /// l'accès au réseau local n'est pas accordé à l'application
-    /// (macOS 15+ / iOS 14+) ; `kDNSServiceErr_PolicyDenied` (-72008)
-    /// apparaît quand la navigation sur ce type de service est
-    /// interdite. Dans les deux cas, le navigateur n'émet aucun
-    /// résultat tant que l'autorisation n'est pas accordée.
-    nonisolated private static func isAuthorizationError(
+    nonisolated static func isAuthorizationError(
         _ error: NWError
     ) -> Bool {
         guard case let .dns(code) = error else { return false }
-        return code == -65555 || code == -72008
+        return Self.isAuthorizationDenied(dnsCode: Int(code))
+    }
+
+    /// Consigne d'accès au réglage « Réseau local », par plateforme :
+    /// macOS ouvre les Réglages Système, iOS la page de l'application
+    /// dans Réglages (qui porte l'interrupteur une fois l'accès
+    /// demandé au moins une fois).
+    nonisolated static var localNetworkRemediation: String {
+        #if os(macOS)
+        return "Vérifiez que « Réseau local » est autorisé pour AirBridge "
+            + "(Réglages Système → Confidentialité et sécurité → "
+            + "Réseau local)."
+        #else
+        return "Vérifiez que « Réseau local » est autorisé pour AirBridge "
+            + "(Réglages → AirBridge → Réseau local)."
+        #endif
     }
 
     /// Message affiché par l'UI pour expliquer qu'une étape Bonjour a
     /// échoué et indiquer l'action à effectuer. Le texte est construit
     /// ici (et non dans les vues) pour rester identique quel que soit
     /// l'écran qui l'affiche.
-    nonisolated private static func localNetworkHint(
+    nonisolated static func localNetworkHint(
         stage: String,
         error: Error
     ) -> String {
-        "\(stage) : \(error.localizedDescription). Vérifiez que « Réseau "
-        + "local » est autorisé pour AirBridge (Réglages Système → "
-        + "Confidentialité et sécurité → Réseau local)."
+        "\(stage) : \(error.localizedDescription). \(Self.localNetworkRemediation)"
+    }
+
+    /// Consigne un refus d'accès au réseau local détecté par l'une ou
+    /// l'autre moitié de la pile.
+    ///
+    /// Le refus est **global** à l'application : quand la recherche est
+    /// bloquée, la publication l'est aussi — même si `NWListener`
+    /// rapporte `.ready`. Sur iOS, la publication refusée
+    /// (`-[_NWAdvertiser …] advertising denied by policy`) ne remonte
+    /// aucun `.failed` : sans cette propagation, le diagnostic
+    /// continuait d'annoncer « publication active » alors que personne
+    /// ne pouvait nous joindre.
+    ///
+    /// Le message n'est journalisé qu'une fois : un refus durable
+    /// n'arrose pas le journal à chaque changement d'état réseau.
+    private func registerLocalNetworkDenial(issue: String, source: String) {
+        if isLocalNetworkAuthorizationDenied {
+            logger.debug(
+                "Refus d'accès au réseau local toujours actif (signalé par \(source, privacy: .public))"
+            )
+        } else {
+            logger.error(
+                "Accès au réseau local refusé (signalé par \(source, privacy: .public)) : découverte et publication bloquées"
+            )
+        }
+
+        isLocalNetworkAuthorizationDenied = true
+        isBrowsingReady = false
+        isAdvertisingReady = false
+        if browsingIssue == nil { browsingIssue = issue }
+        if advertisingIssue == nil { advertisingIssue = issue }
     }
 
     
@@ -279,10 +350,14 @@ final class BonjourService {
                     let authorizationDenied = Self.isAuthorizationError(error)
                     Task { @MainActor [weak self] in
                         guard let self else { return }
-                        self.advertisingIssue = issue
                         self.isAdvertisingReady = false
                         if authorizationDenied {
-                            self.isLocalNetworkAuthorizationDenied = true
+                            self.registerLocalNetworkDenial(
+                                issue: issue,
+                                source: "la publication"
+                            )
+                        } else {
+                            self.advertisingIssue = issue
                         }
                         // Repli symétrique au navigateur : sans relance,
                         // l'app devenait invisible pour les pairs après
@@ -376,10 +451,14 @@ final class BonjourService {
                 let authorizationDenied = Self.isAuthorizationError(error)
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.browsingIssue = issue
                     self.isBrowsingReady = false
                     if authorizationDenied {
-                        self.isLocalNetworkAuthorizationDenied = true
+                        self.registerLocalNetworkDenial(
+                            issue: issue,
+                            source: "la recherche"
+                        )
+                    } else {
+                        self.browsingIssue = issue
                     }
                     // Repli : un `.failed` terminal laissait le
                     // navigateur inerte jusqu'au redémarrage de l'app
@@ -402,21 +481,36 @@ final class BonjourService {
                 Self.staticLogger.debug("Le navigateur est configuré")
 
             case .waiting(let error):
-                Self.staticLogger.debug("La recherche Bonjour attend : \(error.localizedDescription, privacy: .public)")
+                // Le refus d'accès au réseau local arrive LE PLUS
+                // SOUVENT ici — et non dans `.failed` : le navigateur
+                // passe `.ready` puis retombe `.waiting(PolicyDenied)`
+                // (`nw_browser_fail_on_dns_error_locked … -65570`).
+                // C'est ce chemin qui produisait un radar vide sans
+                // bandeau tant que `-65570` n'était pas reconnu.
+                let authorizationDenied = Self.isAuthorizationError(error)
+
+                if authorizationDenied {
+                    Self.staticLogger.error(
+                        "Recherche bloquée : \(error.localizedDescription, privacy: .public)"
+                    )
+                } else {
+                    Self.staticLogger.debug("La recherche Bonjour attend : \(error.localizedDescription, privacy: .public)")
+                }
 
                 // Une attente n'est pas forcément une panne : on ne la
                 // remonte à l'UI que lorsqu'elle trahit un refus
                 // d'autorisation, sinon le bandeau clignoterait à chaque
                 // reconfiguration réseau.
-                if Self.isAuthorizationError(error) {
+                if authorizationDenied {
                     let issue = Self.localNetworkHint(
                         stage: "La recherche d'appareils est bloquée",
                         error: error
                     )
                     Task { @MainActor [weak self] in
-                        self?.browsingIssue = issue
-                        self?.isBrowsingReady = false
-                        self?.isLocalNetworkAuthorizationDenied = true
+                        self?.registerLocalNetworkDenial(
+                            issue: issue,
+                            source: "la recherche"
+                        )
                     }
                 }
 
@@ -567,6 +661,46 @@ final class BonjourService {
         // NWBrowser sont des objets neufs, aucun état résiduel.
         startDiscovery()
         startAdvertising()
+    }
+
+    /// Délai minimal entre deux relances déclenchées par un retour au
+    /// premier plan : sans garde-fou, un va-et-vient rapide
+    /// Réglages ⇄ AirBridge recréerait la pile à chaque aller-retour.
+    nonisolated static let activationRestartThrottle: TimeInterval = 10
+
+    /// Horodatage de la dernière relance automatique (retour au premier
+    /// plan). `.distantPast` au démarrage : la première est immédiate.
+    private var lastActivationRestartDate: Date = .distantPast
+
+    /// Retour au premier plan de l'application.
+    ///
+    /// Cas couvert : l'utilisateur refusait l'accès au réseau local
+    /// (`PolicyDenied`), va l'activer dans Réglages et revient. iOS ne
+    /// réveille NI le navigateur NI l'écouteur dans ce cas — ils
+    /// restent `.waiting(-65570)` indéfiniment. Seule une relance
+    /// complète de la pile rétablit la découverte ; elle redéclenche
+    /// aussi la demande d'autorisation si elle n'a jamais été
+    /// présentée à l'utilisateur.
+    ///
+    /// Sans appel à cette méthode, l'application restait muette après
+    /// un retour de Réglages jusqu'à son redémarrage manuel.
+    func handleApplicationDidBecomeActive() {
+        // Rien à relancer si la pile n'a jamais démarré.
+        guard browser != nil || listener != nil else { return }
+
+        guard isLocalNetworkAuthorizationDenied
+                || !isBrowsingReady
+                || !isAdvertisingReady else { return }
+
+        let now = Date()
+        guard now.timeIntervalSince(lastActivationRestartDate)
+                >= Self.activationRestartThrottle else { return }
+        lastActivationRestartDate = now
+
+        logger.info(
+            "Retour au premier plan — relance de la pile Bonjour (pile dégradée)"
+        )
+        restartMonitoring()
     }
 
     /// Planifie un redémarrage du navigateur après un `.failed`, avec

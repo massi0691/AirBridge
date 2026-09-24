@@ -376,7 +376,14 @@ struct AirBridgeApp: App {
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active { sweepPendingShares() }
+            guard newPhase == .active else { return }
+            sweepPendingShares()
+            // La pile Bonjour est resynchronisée si elle est dégradée :
+            // c'est ce qui permet de capter une autorisation « Réseau
+            // local » accordée dans Réglages pendant que l'app était en
+            // arrière-plan (iOS laisse sinon le navigateur bloqué sur
+            // `PolicyDenied` sans jamais réessayer).
+            coreHolder?.core.refreshDiscoveryIfNeeded()
         }
 #if os(macOS)
         .onChange(of: menuBarEnabled) { _, enabled in
@@ -645,6 +652,15 @@ struct AirBridgeApp: App {
     ///   2. présentation du lot le plus récent non encore présenté.
     @MainActor
     private func sweepPendingShares() {
+        // Conteneur App Group indisponible (capacité App Groups non
+        // provisionnée : compte gratuit, App Group non activé sur
+        // l'App ID) : l'extension ne peut déposer aucun lot, il n'y a
+        // donc rien à balayer. On sort avant toute lecture du
+        // conteneur — c'est ce qui évite le flot de
+        // « container_create_or_lookup_app_group_path_by_app_group_identifier:
+        // client is not entitled » à chaque retour au premier plan.
+        guard AirBridgeAppGroup.containerURL() != nil else { return }
+
         // Fichiers livrés = `sourceFileURL` des transferts sortants
         // terminés. Lecture seule de l'état déjà exposé par le Core —
         // le moteur de transfert n'est pas modifié.
@@ -669,9 +685,7 @@ struct AirBridgeApp: App {
     /// d'envoi : l'utilisateur choisit le destinataire puis envoie.
     @MainActor
     private func presentNewestUnpresentedBatch() {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: "group.com.airbridge.shared"
-        ) else { return }
+        guard let containerURL = AirBridgeAppGroup.containerURL() else { return }
 
         let pendingRoot = PendingShareController.pendingSharesRoot(
             in: containerURL

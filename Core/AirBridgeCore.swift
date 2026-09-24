@@ -4172,6 +4172,18 @@ final class AirBridgeCore {
         bonjourService.restartMonitoring()
     }
 
+    /// Retour au premier plan de l'application (appelé par
+    /// `AirBridgeApp` sur `scenePhase == .active`).
+    ///
+    /// Laisse la pile Bonjour se resynchroniser si elle est dégradée :
+    /// c'est le seul moyen de capter une autorisation « Réseau local »
+    /// accordée dans Réglages pendant que l'app était en arrière-plan
+    /// — iOS laisse sinon le navigateur `.waiting(PolicyDenied)` sans
+    /// jamais réessayer.
+    func refreshDiscoveryIfNeeded() {
+        bonjourService.handleApplicationDidBecomeActive()
+    }
+
     func cancelTransfer(
         transferID: UUID
     ) {

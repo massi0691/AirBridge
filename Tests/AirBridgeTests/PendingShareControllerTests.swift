@@ -343,4 +343,31 @@ final class PendingShareControllerTests: XCTestCase {
         XCTAssertEqual(result.removedBatchDirectories, 0)
         XCTAssertTrue(result.errors.isEmpty)
     }
+
+    /// Conteneur App Group indisponible (capacité App Groups non
+    /// provisionnée : compte gratuit, App Group absent de l'App ID —
+    /// le journal système dit « client is not entitled »).
+    ///
+    /// Ce n'est PAS une erreur de nettoyage : l'extension ne peut pas
+    /// écrire de lot, donc il n'y a rien à purger. Le balayage (qui
+    /// tourne à chaque retour au premier plan) doit rester muet — sinon
+    /// le journal se remplit de lignes identiques et masque les vrais
+    /// incidents.
+    func test_prune_withoutAppGroupContainerIsASilentNoOp() {
+        let controller = controller()
+
+        let result = controller.pruneDeliveredBatches(
+            deliveredSourceURLs: [],
+            containerURL: nil,
+            fileManager: FileManager.default
+        )
+
+        XCTAssertEqual(result.deletedFiles, 0)
+        XCTAssertEqual(result.removedBatchDirectories, 0)
+        XCTAssertTrue(
+            result.errors.isEmpty,
+            "Un conteneur absent n'est pas une erreur de purge : "
+                + "aucune ligne ne doit remonter."
+        )
+    }
 }

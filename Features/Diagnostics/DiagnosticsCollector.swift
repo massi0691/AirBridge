@@ -207,9 +207,10 @@ enum DiagnosticsCollector {
     /// Le conteneur App Group est le canal de remise des fichiers entre le
     /// menu Partager (processus d'extension) et l'application.
     static func isAppGroupContainerAvailable() -> Bool {
-        FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier:
-                PendingShareController.appGroupIdentifier
-        ) != nil
+        // Passe par `AirBridgeAppGroup` : sa résolution est mémorisée,
+        // ce qui évite d'ajouter au journal système une ligne
+        // « client is not entitled » à chaque ouverture du panneau
+        // quand la capacité App Groups n'est pas provisionnée.
+        AirBridgeAppGroup.containerURL() != nil
     }
 }

@@ -42,14 +42,55 @@ enum AirBridgeAppGroup {
     /// test du projet).
     nonisolated(unsafe) static var containerURLOverride: URL?
 
+    /// Résolution système mémorisée (`nil` = pas encore résolu,
+    /// `.some(nil)` = résolu et indisponible).
+    ///
+    /// `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)`
+    /// journalise `container_create_or_lookup_app_group_path_by_app_group_identifier:
+    /// client is not entitled` **à chaque appel** quand la capacité App
+    /// Groups n'est pas provisionnée (compte gratuit, App ID sans
+    /// l'App Group). Le balayage des lots partagés s'exécute à chaque
+    /// retour au premier plan et consultait deux fois le conteneur :
+    /// le journal système était saturé de lignes identiques, au point
+    /// de masquer les vrais incidents.
+    nonisolated(unsafe) private static var cachedSystemContainerURL: URL??
+    private static let cacheLock = NSLock()
+
     /// URL du conteneur partagé, ou `nil` s'il est indisponible.
+    ///
+    /// La résolution système n'est faite qu'une fois par processus ; la
+    /// surcharge de test, elle, est toujours lue en premier (elle peut
+    /// changer entre deux tests).
     static func containerURL() -> URL? {
         if let containerURLOverride {
             return containerURLOverride
         }
-        return FileManager.default.containerURL(
+
+        cacheLock.lock()
+        if let cached = cachedSystemContainerURL {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+
+        let resolved = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: identifier
         )
+
+        cacheLock.lock()
+        cachedSystemContainerURL = resolved
+        cacheLock.unlock()
+
+        return resolved
+    }
+
+    /// Oublie la résolution mémorisée. Réservé aux tests : en
+    /// production le conteneur ne change pas pendant la vie du
+    /// processus.
+    static func resetContainerURLCache() {
+        cacheLock.lock()
+        cachedSystemContainerURL = nil
+        cacheLock.unlock()
     }
 
     /// Racine des fichiers d'état partagés (séparée de
